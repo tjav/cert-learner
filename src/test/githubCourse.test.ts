@@ -1,6 +1,6 @@
 import * as assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { EventEmitter } from 'node:events';
+import { EventEmitter, getEventListeners } from 'node:events';
 import { readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
@@ -199,6 +199,7 @@ const drain = (): Promise<void> => new Promise(resolve => { setImmediate(resolve
  */
 class Files {
 	readonly entries = new Map<string, { directory: boolean; bytes: Buffer; ino: number; symlink?: boolean }>();
+	readonly reads: string[] = [];
 	readonly removed: string[] = [];
 	readonly writes: string[] = [];
 	private next = 1;
@@ -206,6 +207,7 @@ class Files {
 		this.entries.set(file, { directory: content === undefined, bytes: Buffer.from(content ?? ''), ino: this.next++ });
 	}
 	info(file: string) {
+		this.reads.push(file);
 		const entry = this.entries.get(file);
 		if (!entry) { throw Object.assign(new Error('PRIVATE_FILESYSTEM_ERROR'), { code: 'ENOENT' }); }
 		return { dev: 1, ino: entry.ino, size: entry.bytes.length, isDirectory: () => entry.directory,
@@ -258,6 +260,7 @@ class Host {
 	readonly killStarted = deferred<Launch>();
 	readonly kills: [number, string][] = [];
 	readonly warnings: string[] = [];
+	readonly dialogs: string[] = [];
 	readonly logs: unknown[][] = [];
 	readonly reports: unknown[] = [];
 	readonly listeners = new Set<() => void>();
@@ -296,12 +299,14 @@ class Host {
 		workspace: this.workspace, ProgressLocation: { Notification: 15 },
 		extensions: { getExtension: (id: string) => { assert.equal(id, 'vscode.git'); this.extensionCalls++; return this.extension; } },
 		window: {
-			showInputBox: async (options: vscode.InputBoxOptions) => { this.inputOptions = options; return this.input; },
+			showInputBox: async (options: vscode.InputBoxOptions) => { this.dialogs.push('input'); this.inputOptions = options; return this.input; },
 			showOpenDialog: async (options: vscode.OpenDialogOptions) => {
+				this.dialogs.push('picker');
 				assert.equal(options.canSelectFiles, false); assert.equal(options.canSelectFolders, true); assert.equal(options.canSelectMany, false);
 				return this.folders;
 			},
 			showInformationMessage: async (_message: string, options: { modal: boolean; detail: string }, ...buttons: string[]) => {
+				this.dialogs.push('confirmation');
 				assert.equal(options.modal, true); assert.deepEqual(buttons, ['Clone course']);
 				this.confirmation = options.detail; this.onConfirm(); return this.answer;
 			},
@@ -338,10 +343,11 @@ class Host {
 		}
 		return launch.child;
 	};
-	async run(): Promise<string | undefined> {
-		const operation = this.load().cloneGitHubCourse(this.context);
+	async run(signal?: AbortSignal): Promise<string | undefined> {
+		const operation = this.load().cloneGitHubCourse(this.context, signal);
 		try { return await operation; } finally {
 			assert.equal(this.listeners.size, 0); assert.equal(this.timers.size, 0); assert.equal(this.context.subscriptions.length, 0);
+			if (signal) { assert.equal(getEventListeners(signal, 'abort').length, 0, 'No retained owner cancellation listener'); }
 		}
 	}
 	private load(): typeof import('../githubCourse') {
@@ -461,7 +467,10 @@ describe('GitHub auth config with real local Git (isolated fixtures, no helpers 
 describe('GitHub clone host contract (no real Git, network, credentials, or filesystem writes)', () => {
 	it('returns a root only after real loadCourse validation and uses isolated phase configurations', async () => {
 		const host = new Host();
-		assert.equal(await host.run(), DESTINATION);
+		const lifetime = new AbortController();
+		assert.equal(await host.run(lifetime.signal), DESTINATION);
+		lifetime.abort(); // A completed flow no longer belongs to the owner.
+		assert.deepEqual(host.kills, []);
 		assert.deepEqual(host.warnings, []);
 		assert.equal(host.launches.length, 3);
 		const [query, clone, checkout] = host.launches;
@@ -584,10 +593,11 @@ describe('GitHub clone host contract (no real Git, network, credentials, or file
 		}
 	});
 	for (const platform of ['win32', 'linux']) {
-		for (const reason of ['overflow', 'timeout', 'cancel', 'dispose']) {
+		for (const reason of ['overflow', 'timeout', 'cancel', 'dispose', 'owner']) {
 			it(`${platform}: query ${reason} waits for process exit before network or cleanup`, async () => {
 				const host = new Host(); host.platform = platform; host.queryBehavior = () => {};
-				const operation = host.run(); const query = await host.queryStarted.promise;
+				const lifetime = new AbortController();
+				const operation = host.run(reason === 'owner' ? lifetime.signal : undefined); const query = await host.queryStarted.promise;
 				query.child.stdout.emit('data', Buffer.from('credential.https://github.com.helper\n!echo DUMMY_PRIVATE_HELPER\0'));
 				if (reason === 'overflow') { query.child.stdout.emit('data', Buffer.alloc(64 * 1024)); }
 				if (reason === 'timeout') {
@@ -596,6 +606,7 @@ describe('GitHub clone host contract (no real Git, network, credentials, or file
 				}
 				if (reason === 'cancel') { host.cancel(); }
 				if (reason === 'dispose') { host.context.subscriptions[0].dispose(); }
+				if (reason === 'owner') { lifetime.abort(); }
 				await drain();
 				assert.equal(host.launches.some(launch => launch.args.includes('clone')), false);
 				assert.deepEqual(host.fs.removed, []);
@@ -609,12 +620,17 @@ describe('GitHub clone host contract (no real Git, network, credentials, or file
 				} else {
 					assert.deepEqual(host.kills, [[-query.child.pid, 'SIGKILL']]); query.child.finish(1);
 				}
-				const cancelled = reason === 'cancel' || reason === 'dispose';
+				const cancelled = reason === 'cancel' || reason === 'dispose' || reason === 'owner';
 				assert.equal(await operation, cancelled ? undefined : DESTINATION);
 				const clone = host.launches.find(launch => launch.args.includes('clone'));
-				if (cancelled) { assert.equal(clone, undefined); assert.match(host.warnings[0], /cancelled/u); }
+				if (cancelled) {
+					assert.equal(clone, undefined);
+					if (reason === 'owner') { assert.deepEqual(host.warnings, []); }
+					else { assert.match(host.warnings[0], /cancelled/u); }
+				}
 				else { assert.ok(clone); assert.equal(clone.options.env?.GIT_CONFIG_COUNT, undefined); }
 				assert.equal(host.fs.removed.length, 1);
+				assert.equal(host.fs.entries.has(DESTINATION), true);
 				assert.doesNotMatch(JSON.stringify([host.warnings, host.logs, host.reports, host.fs.writes, clone?.options.env]), /DUMMY_PRIVATE/u);
 				assert.deepEqual(host.logs, []);
 			});
@@ -628,6 +644,58 @@ describe('GitHub clone host contract (no real Git, network, credentials, or file
 		} }; } };
 		assert.equal(await host.run(), DESTINATION); assert.equal(activated, 1);
 		assert.ok(host.launches.every(launch => launch.executable === executable));
+	});
+	it('an already-retired owner never prompts or touches the filesystem', async () => {
+		const host = new Host(); const lifetime = new AbortController(); lifetime.abort();
+		assert.equal(await host.run(lifetime.signal), undefined);
+		assert.deepEqual(host.dialogs, []); assert.deepEqual(host.warnings, []);
+		assert.deepEqual(host.fs.reads, []); assert.deepEqual(host.fs.writes, []);
+		assert.deepEqual(host.launches, []); assert.equal(host.progressCalls, 0);
+	});
+	for (const stage of ['input', 'picker', 'confirmation']) {
+		it(`owner cancellation ignores a pending ${stage} result without further dialogs, filesystem access or Git`, async () => {
+			const host = new Host(); const lifetime = new AbortController();
+			const pending = deferred<void>(); const resume = deferred<void>();
+			const hold = <A extends unknown[], T>(prompt: (...args: A) => Promise<T>) => async (...args: A): Promise<T> => {
+				const result = await prompt(...args);
+				pending.resolve(); await resume.promise; return result;
+			};
+			if (stage === 'input') { host.api.window.showInputBox = hold(host.api.window.showInputBox); }
+			if (stage === 'picker') { host.api.window.showOpenDialog = hold(host.api.window.showOpenDialog); }
+			if (stage === 'confirmation') { host.api.window.showInformationMessage = hold(host.api.window.showInformationMessage); }
+			const operation = host.run(lifetime.signal);
+			await pending.promise;
+			const reads = [...host.fs.reads]; const dialogs = [...host.dialogs];
+			lifetime.abort(); resume.resolve();
+			assert.equal(await operation, undefined);
+			assert.deepEqual(host.dialogs, dialogs); assert.deepEqual(host.warnings, []);
+			assert.deepEqual(host.fs.reads, reads); assert.deepEqual(host.fs.writes, []);
+			assert.equal(host.fs.entries.has(DESTINATION), false); assert.deepEqual(host.fs.removed, []);
+			assert.deepEqual(host.launches, []); assert.equal(host.extensionCalls, 0); assert.equal(host.progressCalls, 0);
+		});
+	}
+	it('owner cancellation during Git extension activation stops before executable inspection or Git', async () => {
+		const host = new Host(); const lifetime = new AbortController();
+		const pending = deferred<void>(); const activation = deferred<unknown>();
+		const executable = path.join(ROOT, 'git.exe'); host.fs.put(executable, '');
+		host.extension = { isActive: false, activate: async () => { pending.resolve(); return activation.promise; } };
+		const operation = host.run(lifetime.signal);
+		await pending.promise;
+		const reads = [...host.fs.reads];
+		lifetime.abort(); activation.resolve({ getAPI: () => ({ git: { path: executable } }) });
+		assert.equal(await operation, undefined);
+		assert.deepEqual(host.fs.reads, reads); assert.deepEqual(host.launches, []); assert.deepEqual(host.warnings, []);
+		assert.equal(host.fs.removed.length, 1); assert.equal(host.fs.entries.has(DESTINATION), true);
+	});
+	it('owner cancellation during cleanup suppresses both clone failures and cleanup warnings', async () => {
+		for (const invalid of [false, true]) {
+			const host = new Host(); const lifetime = new AbortController();
+			if (invalid) { host.checkoutFiles = {}; }
+			host.fs.api.rm = async () => { lifetime.abort(); throw new Error('PRIVATE_CLEANUP_ERROR'); };
+			assert.equal(await host.run(lifetime.signal), undefined);
+			assert.deepEqual(host.warnings, []); assert.deepEqual(host.logs, []);
+			assert.equal(host.fs.entries.has(DESTINATION), true);
+		}
 	});
 	it('cancelled input, picker, confirmation and already-cancelled progress never spawn', async () => {
 		for (const stage of ['input', 'picker', 'confirmation', 'progress']) {
@@ -722,16 +790,18 @@ describe('GitHub clone host contract (no real Git, network, credentials, or file
 		assert.equal(await scriptHost.run(), undefined); assert.deepEqual(scriptHost.launches, []);
 	});
 	for (const platform of ['win32', 'linux']) {
-		for (const reason of ['cancel', 'timeout', 'dispose']) {
+		for (const reason of ['cancel', 'timeout', 'dispose', 'owner']) {
 			it(`${platform}: ${reason} kills only the owned tree and waits for exit before cleanup`, async () => {
 				const host = new Host(); host.platform = platform; host.behavior = () => {};
-				let settled = false; const operation = host.run().then(value => { settled = true; return value; });
+				const lifetime = new AbortController();
+				let settled = false; const operation = host.run(reason === 'owner' ? lifetime.signal : undefined).then(value => { settled = true; return value; });
 				const launch = await host.started.promise;
 				assert.equal(launch.options.detached, platform !== 'win32');
 				const [timer] = host.timers.values(); assert.equal(timer.ms, 600000);
 				if (reason === 'cancel') { host.cancel(); }
 				if (reason === 'timeout') { timer.callback(); }
 				if (reason === 'dispose') { host.context.subscriptions[0].dispose(); }
+				if (reason === 'owner') { lifetime.abort(); }
 				await drain(); assert.equal(settled, false); assert.deepEqual(host.fs.removed, []);
 				if (platform === 'win32') {
 					const killer = await host.killStarted.promise;
@@ -744,8 +814,11 @@ describe('GitHub clone host contract (no real Git, network, credentials, or file
 				}
 				assert.equal(await operation, undefined); assert.equal(host.fs.removed.length, 1);
 				assert.equal(host.fs.entries.has(DESTINATION), true);
-				assert.match(host.warnings[0], reason === 'timeout' ? /timed out after 10 minutes/u : /cancelled/u);
-				assert.match(host.warnings[0], /possibly partial.*not registered/u);
+				if (reason === 'owner') { assert.deepEqual(host.warnings, []); }
+				else {
+					assert.match(host.warnings[0], reason === 'timeout' ? /timed out after 10 minutes/u : /cancelled/u);
+					assert.match(host.warnings[0], /possibly partial.*not registered/u);
+				}
 			});
 		}
 	}

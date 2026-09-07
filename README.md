@@ -5,12 +5,12 @@
 | Identity | Value |
 | --- | --- |
 | Extension ID | `tjav.cert-learner` |
-| Implementation version | **0.2.0** |
+| Implementation version | **0.2.1** |
 | GitHub repository | [tjav/cert-learner](https://github.com/tjav/cert-learner), **PUBLIC** |
 | License | **UNLICENSED**, intentionally pending a license decision; not an open-source license grant |
 | Host API requirement | VS Code **1.103.0 or later**, within the declared `^1.103.0` range |
 
-**Status: v0.2.0 preview.** Adds confirmed GitHub course cloning, unit-level Lab/Quiz children, and interactive practice grading. Local validation: 242 tests passed (15 Windows permission-dependent skips), plus 11 real editor-host tests. All 245 questions across the 17 AI103 quizzes load, including 36 multi-answer questions. A live private-repository clone and destination-collision refusal were verified with the actual clone implementation and simulated editor dialogs. Browser checks exercised the actual quiz panel's correct/incorrect feedback, multi-select grading, results, and retry. Native notebook maintenance, tutor interactions, and general Agent handoffs still require user acceptance testing. See [CHANGELOG.md](CHANGELOG.md) for scope.
+**Status: v0.2.1 preview.** Fixes activation in unsupported virtual/Agent Host workspaces with recovery guidance instead of missing commands. Retains v0.2.0 GitHub course cloning, unit-level Lab/Quiz children, and interactive practice grading. Historical v0.2.0 validation: 242 tests passed (15 Windows permission-dependent skips), plus 11 real editor-host tests. All 245 questions across the 17 AI103 quizzes load, including 36 multi-answer questions. A live private-repository clone and destination-collision refusal were verified with the actual clone implementation and simulated editor dialogs. Browser checks exercised the actual quiz panel's correct/incorrect feedback, multi-select grading, results, and retry. Native notebook maintenance, tutor interactions, and general Agent handoffs still require user acceptance testing. See [CHANGELOG.md](CHANGELOG.md) for scope.
 
 ## What v0.2.0 does
 
@@ -49,6 +49,37 @@ Install the preview from the public repository's releases:
 You can also build locally using the developer steps below. This project does not claim a Marketplace listing. **GitHub VSIX updates are manual:** download the next release and repeat installation in the same host. Export progress before changing host, workspace, or course location. No updater polls GitHub.
 
 ## Add a course and learn
+
+### Virtual workspace / “command not found” recovery
+
+If v0.2.0 reports **“Cert Learner supports local file resources only”** during
+activation, subsequent commands such as `certLearner.add` or `certLearner.addGitHub`
+may be missing. Upgrade to **v0.2.1 or later** and reload the window.
+
+In Agent Host/Copilot virtual workspaces (for example `agent-host-copilotcli:`),
+v0.2.1 registers the commands but provides **recovery guidance only**. The Learning
+view explains the limitation. Run **Learning: Add Course**, choose **Open local
+folder...**, and select a local folder to open in a **new desktop window**. You can
+also use **File → Open Folder…** in a regular VS Code window. If a host cannot open
+that window, follow these steps manually. Install the VSIX in the target window's
+profile if necessary, then run **Learning: Add Course** again there.
+
+The recovery mode does not load courses, clone repositories, read or migrate
+progress, run checks/notebooks, or send tutor requests. `getState()` includes an
+`unavailable` explanation; programmatic course-changing APIs reject. Nonlocal
+storage is never silently replaced with local global storage. Mixed local/virtual
+roots retain local-only discovery when storage and host are local. Virtual/remote
+learning itself remains unsupported.
+
+Workspace-folder changes reevaluate this mode. Removing the last local root
+retires the learning session and cancels its active work; adding a local root can
+restore local learning when the host and storage support it. Neither transition
+relocates progress. If reinitialization fails, learning stays disabled with reload
+guidance. v0.2.1 validation: **273 tests passed** (15 existing skips), plus **11
+standard VS Code host tests**. The Agent Host URI regression uses an isolated host
+boundary; this is not a claim of testing the learner's other installation.
+
+### Local learning workflow
 
 1. Obtain and review a course pack locally. A [course.json manifest](examples/foundations/course.json#L1) immediately inside each local workspace root is discovered automatically; discovery is **not recursive**.
 2. Run **Learning: Add Course**, choose **Local folder**, and select the **course folder containing the manifest**, not an individual file. Alternatively choose **GitHub repository** as described below. Explicit registrations are remembered for the current workspace. **Learning: Refresh Courses** reloads them; manifest changes also trigger refresh.

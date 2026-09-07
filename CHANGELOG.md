@@ -2,6 +2,18 @@
 
 Implementation changes for **Certification Learning** (`tjav.cert-learner`). Version headings do not imply that a GitHub Release has been published.
 
+## 0.2.1 — virtual workspace activation recovery
+
+### Fixed
+
+- Nonlocal storage (including `agent-host-copilotcli:`), virtual-only roots, and unsupported remote hosts no longer throw before command registration. Every contributed Learning command remains registered in a recovery-only mode.
+- The Learning tree and command prompts explain how to open a local desktop folder. After an explicit choice, a validated `file:` folder opens in a **new window**, preserving the original window and unsaved work. Canceling or choosing a virtual folder does nothing.
+- The optional tutor explains the same limitation without invoking a model. The API returns empty, detached registry/state snapshots with an `unavailable` reason; mutation APIs reject explicitly rather than reporting success.
+- Manifest virtual-workspace support is now **limited: recovery guidance only**. This does not add virtual/remote learning, cloning, or execution support. No nonlocal URI is converted to a local path; no fallback moves workspace progress into global storage.
+- Workspace-folder changes reevaluate support through one lifecycle owner. Retired sessions dispose commands/views and cancel checks, tutor work, pending clone prompts, and active clone processes before another mode takes over. Stale callbacks and progress commits cannot target the replacement session; the storage location stays unchanged.
+- Regression coverage executes compiled activation for Agent Host/virtual URIs, commands, tree/tutor guidance, cancellation, disposal, folder validation and missing host UI. Existing desktop integration tests continue to cover normal learning.
+- Validation: 273 local tests passed, 15 existing Windows/optional-fixture skips; 11 standard VS Code host tests passed. The reported Agent Host scheme is covered with an isolated host boundary, not a test on the learner's other VS Code installation.
+
 ## 0.2.0 — local preview implementation
 
 ### Added

@@ -75,9 +75,10 @@ suite('Certification Learning host integration', () => {
 
 	test('registers native learning commands', async () => {
 		const commands = await vscode.commands.getCommands(true);
-		for (const command of ['add', 'resume', 'open', 'openLab', 'openQuiz', 'openPage', 'portalWalkthrough', 'revertUnit', 'getState', 'export', 'import', 'reset']) {
+		for (const command of ['add', 'addGitHub', 'refresh', 'sample', 'remove', 'resume', 'open', 'openLab', 'openQuiz', 'openPage', 'portalWalkthrough', 'revertUnit', 'getState', 'export', 'import', 'reset']) {
 			assert.ok(commands.includes(`certLearner.${command}`), command);
 		}
+		assert.equal((await api.getState()).unavailable, undefined, 'Local desktop activation retains full learning support');
 	});
 	test('opens every registered page before selecting an activity without changing state or starting tasks', async () => {
 		assert.deepEqual(getCoursePages(first).map(page => [page.kind, page.path, page.title]), [

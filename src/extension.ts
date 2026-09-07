@@ -17,7 +17,8 @@ import { QuizPanel } from './ui/quizPanel';
 import { cloneGitHubCourse } from './githubCourse';
 import { activityLabel, completionSummary } from './ui/status';
 import { CourseTree } from './ui/tree';
-import type { Selection } from './ui/tree';
+import type { Selection, TreeEntry } from './ui/tree';
+import { needsLocalWorkspace, UnsupportedWorkspace } from './unsupportedWorkspace';
 
 type Position = { courseId: string; unitId: string; activityId: string };
 type RunningCheck = { generation: number; source: vscode.CancellationTokenSource };
@@ -103,15 +104,23 @@ async function tutorLesson(selection: Selection): Promise<string> {
 	} finally { await handle.close(); }
 }
 
+/** Fence every progress commit, including reset/import, to its owning session. */
+class LearningProgressStore extends ProgressStore {
+	constructor(directory: string, private readonly active: () => boolean) { super(directory); }
+	override update(course: Course, mutate: (progress: Progress) => void, guard: () => boolean = () => true): Promise<Progress> {
+		return super.update(course, mutate, () => this.active() && guard());
+	}
+}
+
 class LearningExtension implements vscode.Disposable {
 	private readonly courses = new Map<string, Course>();
 	private readonly progress = new Map<string, Progress>();
 	private readonly registrations = new Map<string, string>();
 	private current: Selection | undefined;
 	private readonly store: ProgressStore;
-	private readonly output = vscode.window.createOutputChannel('Cert Learner');
-	private readonly tree = new CourseTree(course => this.progress.get(course.id));
-	private readonly view = vscode.window.createTreeView('certLearner.courses', { treeDataProvider: this.tree });
+	private readonly output: vscode.OutputChannel;
+	private readonly tree: CourseTree;
+	private readonly view: vscode.TreeView<TreeEntry>;
 	private panel: ActivityPanel;
 	private readonly pagePanel: CoursePagePanel;
 	private readonly quizPanel: QuizPanel;
@@ -120,75 +129,85 @@ class LearningExtension implements vscode.Disposable {
 	private readonly running = new Map<string, RunningCheck>();
 	private readonly generations = new Map<string, number>();
 	private readonly tutors = new Set<vscode.CancellationTokenSource>();
+	private readonly lifetime = new AbortController();
 	private tail: Promise<void> = Promise.resolve();
 	private timer: ReturnType<typeof setTimeout> | undefined;
 	private disposed = false;
 	private tutorAvailable = false;
 
 	constructor(private readonly context: vscode.ExtensionContext, private readonly storageDir: string) {
-		this.store = new ProgressStore(storageDir);
-		this.panel = this.createPanel();
-		this.quizPanel = new QuizPanel(context, selection => this.ui(async () => {
-			const { course, unit } = this.resolveUnit({ courseId: selection.course.id, unitId: selection.unit.unitId });
-			if (!unit.resources.quiz) { throw new Error('No quiz is declared.'); }
-			const file = await resolveResource(course.root, unit.resources.quiz);
-			if (!/\.(md|json)$/iu.test(file)) { throw new Error('Unsupported quiz source.'); }
-			await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(vscode.Uri.file(file)), { preview: true });
-		}));
-		this.pagePanel = new CoursePagePanel(context, selection => this.ui(async () => {
-			const fresh = this.resolvePage({ courseId: selection.course.id, pageId: selection.page.id });
-			const file = await resolveResource(fresh.course.root, fresh.page.path);
-			if (path.extname(file).toLowerCase() !== '.md') { throw new Error('Course pages must be Markdown.'); }
-			await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(vscode.Uri.file(file)), { preview: true });
-		}));
-		this.listeners.push(vscode.workspace.onDidChangeWorkspaceFolders(() => this.scheduleRefresh()));
-		this.command('add', async () => {
-			const choice = await vscode.window.showQuickPick([
-				{ label: 'Local folder', description: 'Use a course already on this computer', source: 'local' },
-				{ label: 'GitHub repository', description: 'Clone a GitHub link into a new local folder', source: 'github' }
-			], { title: 'Add a certification course' });
-			if (!choice) { return; }
-			if (choice.source === 'github') { await this.addFromGitHub(); return; }
-			const folders = await vscode.window.showOpenDialog({
-				canSelectFiles: false, canSelectFolders: true, canSelectMany: false, openLabel: 'Add course folder'
-			});
-			if (folders?.[0]) {
-				const course = await this.addCourse(localFile(folders[0]));
-				await this.resumeCourse(course.id);
-			}
-		});
-		this.command('addGitHub', () => this.addFromGitHub());
-		this.command('openLab', input => this.unitResourceCommand(input, 'lab'));
-		this.command('openQuiz', input => this.unitResourceCommand(input, 'quiz'));
-		this.command('refresh', () => this.refresh());
-		this.command('resume', async () => {
-			const id = await this.pickCourse();
-			if (id) { await this.resumeCourse(id); }
-		});
-		this.command('open', input => this.serial(() => this.openNow(positionOf(input))));
-		this.command('openPage', input => this.openPage(input));
-		this.command('portalWalkthrough', input => this.activityToolCommand(input, 'portal-walkthrough'));
-		this.command('revertUnit', input => this.activityToolCommand(input, 'revert-unit'));
-		this.command('sample', async () => {
-			const course = await this.addCourse(localFile(vscode.Uri.joinPath(context.extensionUri, 'examples', 'foundations', 'course.json')));
-			await this.resumeCourse(course.id);
-		});
-		this.command('export', () => this.exportCourse());
-		this.command('import', () => this.importCourse());
-		this.command('reset', async () => {
-			const id = await this.pickCourse();
-			if (id) { await this.resetProgress(id); }
-		});
-		this.command('remove', () => this.removeCourse());
-		this.command('getState', () => this.getState());
 		try {
-			if (typeof vscode.chat?.createChatParticipant === 'function') {
-				this.listeners.push(vscode.chat.createChatParticipant('certLearner.tutor',
-					(request, _history, stream, token) => this.tutor(request, stream, token)));
-				this.tutorAvailable = true;
+			this.output = vscode.window.createOutputChannel('Cert Learner');
+			this.tree = new CourseTree(course => this.progress.get(course.id));
+			this.view = vscode.window.createTreeView('certLearner.courses', { treeDataProvider: this.tree });
+			this.store = new LearningProgressStore(storageDir, () => !this.disposed);
+			this.panel = this.createPanel();
+			this.quizPanel = new QuizPanel(context, selection => this.ui(async () => {
+				const { course, unit } = this.resolveUnit({ courseId: selection.course.id, unitId: selection.unit.unitId });
+				if (!unit.resources.quiz) { throw new Error('No quiz is declared.'); }
+				const file = await resolveResource(course.root, unit.resources.quiz);
+				if (!/\.(md|json)$/iu.test(file)) { throw new Error('Unsupported quiz source.'); }
+				await this.openSource(file);
+			}));
+			this.pagePanel = new CoursePagePanel(context, selection => this.ui(async () => {
+				const fresh = this.resolvePage({ courseId: selection.course.id, pageId: selection.page.id });
+				const file = await resolveResource(fresh.course.root, fresh.page.path);
+				if (path.extname(file).toLowerCase() !== '.md') { throw new Error('Course pages must be Markdown.'); }
+				await this.openSource(file);
+			}));
+			this.command('add', async () => {
+				const choice = await vscode.window.showQuickPick([
+					{ label: 'Local folder', description: 'Use a course already on this computer', source: 'local' },
+					{ label: 'GitHub repository', description: 'Clone a GitHub link into a new local folder', source: 'github' }
+				], { title: 'Add a certification course' });
+				if (!choice) { return; }
+				this.requireActive();
+				if (choice.source === 'github') { await this.addFromGitHub(); return; }
+				const folders = await vscode.window.showOpenDialog({
+					canSelectFiles: false, canSelectFolders: true, canSelectMany: false, openLabel: 'Add course folder'
+				});
+				if (folders?.[0]) {
+					const course = await this.addCourse(localFile(folders[0]));
+					await this.resumeCourse(course.id);
+				}
+			});
+			this.command('addGitHub', () => this.addFromGitHub());
+			this.command('openLab', input => this.unitResourceCommand(input, 'lab'));
+			this.command('openQuiz', input => this.unitResourceCommand(input, 'quiz'));
+			this.command('refresh', () => this.refresh());
+			this.command('resume', async () => {
+				const id = await this.pickCourse();
+				if (id) { await this.resumeCourse(id); }
+			});
+			this.command('open', input => this.serial(() => this.openNow(positionOf(input))));
+			this.command('openPage', input => this.openPage(input));
+			this.command('portalWalkthrough', input => this.activityToolCommand(input, 'portal-walkthrough'));
+			this.command('revertUnit', input => this.activityToolCommand(input, 'revert-unit'));
+			this.command('sample', async () => {
+				const course = await this.addCourse(localFile(vscode.Uri.joinPath(context.extensionUri, 'examples', 'foundations', 'course.json')));
+				await this.resumeCourse(course.id);
+			});
+			this.command('export', () => this.exportCourse());
+			this.command('import', () => this.importCourse());
+			this.command('reset', async () => {
+				const id = await this.pickCourse();
+				if (id) { await this.resetProgress(id); }
+			});
+			this.command('remove', () => this.removeCourse());
+			this.command('getState', () => this.getState());
+			try {
+				if (typeof vscode.chat?.createChatParticipant === 'function') {
+					this.listeners.push(vscode.chat.createChatParticipant('certLearner.tutor',
+						(request, _history, stream, token) => this.tutor(request, stream, token)));
+					this.tutorAvailable = true;
+				}
+			} catch {
+				this.output.appendLine('Tutor registration unavailable. Local learning and the copy-prompt fallback remain available.');
 			}
-		} catch {
-			this.output.appendLine('Tutor registration unavailable. Local learning and the copy-prompt fallback remain available.');
+		} catch (error) {
+			// A failed transition must not retain partially registered commands/views.
+			this.dispose();
+			throw error;
 		}
 	}
 
@@ -201,7 +220,19 @@ class LearningExtension implements vscode.Disposable {
 	}
 
 	private async ui<T>(work: () => Promise<T>): Promise<T | undefined> {
+		if (this.disposed) { return undefined; }
 		try { return await work(); } catch (error) { this.report(error); return undefined; }
+	}
+
+	private requireActive(): void {
+		if (this.disposed) { throw new Error('Cert Learner has been disposed.'); }
+	}
+
+	private async openSource(file: string): Promise<void> {
+		this.requireActive();
+		const document = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
+		this.requireActive();
+		await vscode.window.showTextDocument(document, { preview: true });
 	}
 
 	report(error: unknown): void {
@@ -223,6 +254,7 @@ class LearningExtension implements vscode.Disposable {
 	}
 
 	private course(id: string): Course {
+		this.requireActive();
 		const course = this.courses.get(id);
 		if (!course) { throw new Error('This course is no longer registered. Refresh and select it again.'); }
 		return course;
@@ -237,19 +269,23 @@ class LearningExtension implements vscode.Disposable {
 	}
 
 	private async read(course: Course): Promise<Progress> {
+		this.requireActive();
 		// Cached values serve rendering only, never decisions or writes.
 		this.progress.delete(course.id);
 		const progress = await this.store.read(course);
+		this.requireActive();
 		this.progress.set(course.id, progress);
 		return progress;
 	}
 
 	private async addFromGitHub(): Promise<void> {
-		const root = await cloneGitHubCourse(this.context);
+		this.requireActive();
+		const root = await cloneGitHubCourse(this.context, this.lifetime.signal);
 		if (!root || this.disposed) { return; }
 		this.requireTrust();
 		const course = await this.addCourse(root);
 		await this.resumeCourse(course.id);
+		this.requireActive();
 		await vscode.window.showInformationMessage('GitHub course cloned and added. No course code was run. Review the repository before running labs or checks.');
 	}
 
@@ -290,6 +326,7 @@ class LearningExtension implements vscode.Disposable {
 			if (kind === 'quiz') { await this.quizPanel.show(selected); }
 			else if (kind === 'lab') {
 				await this.openLab(selected);
+				this.requireActive();
 				void vscode.window.showInformationMessage('Lab opened without execution. Select your kernel and review billable and cleanup cells before running them.');
 			} else { throw new Error('Unknown unit resource.'); }
 		});
@@ -335,19 +372,26 @@ class LearningExtension implements vscode.Disposable {
 			if ((await vscode.commands.getCommands(true)).includes('workbench.action.chat.open')) {
 				this.requireTrust();
 				await vscode.commands.executeCommand('workbench.action.chat.open', { query, isPartialQuery: true });
+				this.requireActive();
 				const fallback = await vscode.window.showInformationMessage(`${title} draft prepared. If chat did not open, use Copy draft. Select general Agent mode (not @certlearning), review the context and submit. Nothing ran or reset.`, 'Copy draft');
 				if (fallback === 'Copy draft') { this.requireTrust(); await vscode.env.clipboard.writeText(query); }
 				return;
 			}
-		} catch { this.output.appendLine('General chat UI unavailable; offering draft copy.'); }
+		} catch {
+			if (this.disposed) { return; }
+			this.output.appendLine('General chat UI unavailable; offering draft copy.');
+		}
+		this.requireActive();
 		if (await vscode.window.showInformationMessage('Chat is unavailable. Copy the draft to use in general Agent chat?', 'Copy draft') === 'Copy draft') {
 			this.requireTrust();
 			await vscode.env.clipboard.writeText(query);
+			this.requireActive();
 			await vscode.window.showInformationMessage('Draft copied. No code ran and no progress changed.');
 		}
 	}
 
 	private paths(): string[] {
+		this.requireActive();
 		const stored = this.context.workspaceState.get<unknown>('coursePaths', []);
 		if (!Array.isArray(stored) || stored.length > 1000 || stored.some(item => typeof item !== 'string')) {
 			throw new Error('Stored coursePaths is invalid; registrations were not overwritten.');
@@ -358,6 +402,7 @@ class LearningExtension implements vscode.Disposable {
 	refresh(): Promise<void> { return this.serial(() => this.refreshNow()); }
 
 	private async refreshNow(): Promise<void> {
+		this.requireActive();
 		const paths = new Map<string, string>();
 		let failures = 0;
 		const failed = (error: unknown): void => { failures++; this.report(error); };
@@ -387,7 +432,9 @@ class LearningExtension implements vscode.Disposable {
 					if (isErrno(error, 'ENOENT') && !explicitKeys.has(pathKey(file))) { continue; }
 					throw error;
 				}
+				this.requireActive();
 				const course = await loadCourse(file);
+				this.requireActive();
 				registrations.set(pathKey(file), course.id);
 				const previous = next.get(course.id);
 				if (previous) {
@@ -399,6 +446,7 @@ class LearningExtension implements vscode.Disposable {
 				next.set(course.id, course);
 				try { nextProgress.set(course.id, await this.store.read(course)); } catch (error) { failed(error); }
 			} catch (error) {
+				if (this.disposed) { return; }
 				this.output.appendLine(`Course manifest: ${file}`);
 				failed(error);
 			}
@@ -447,7 +495,7 @@ class LearningExtension implements vscode.Disposable {
 		});
 	}
 
-	getCourses(): Course[] { return [...this.courses.values()].map(course => structuredClone(course)); }
+	getCourses(): Course[] { return this.disposed ? [] : [...this.courses.values()].map(course => structuredClone(course)); }
 
 	getState() {
 		return this.serial(async () => {
@@ -490,6 +538,7 @@ class LearningExtension implements vscode.Disposable {
 		const progress = await this.store.update(selection.course, draft => {
 			draft.position = { unitId: ids.unitId, activityId: ids.activityId };
 		});
+		this.requireActive();
 		this.current = selection;
 		this.progress.set(selection.course.id, progress);
 		this.tree.refresh();
@@ -518,6 +567,7 @@ class LearningExtension implements vscode.Disposable {
 	}
 
 	private async changed(course: Course, progress: Progress): Promise<void> {
+		this.requireActive();
 		this.progress.set(course.id, progress);
 		this.tree.refresh();
 		if (this.current?.course.id === course.id) { await this.showCurrent(); }
@@ -535,18 +585,22 @@ class LearningExtension implements vscode.Disposable {
 		await this.serial(async () => {
 			const course = this.course(id);
 			const data = exportProgress(course, await this.read(course));
+			this.requireActive();
 			await vscode.workspace.fs.writeFile(uri, Buffer.from(`${JSON.stringify(data, null, 2)}\n`, 'utf8'));
 		});
+		this.requireActive();
 		await vscode.window.showInformationMessage('Portable progress exported to the file you selected.');
 	}
 
 	private async importCourse(): Promise<void> {
 		const id = await this.pickCourse();
 		if (!id) { return; }
+		this.requireActive();
 		const files = await vscode.window.showOpenDialog({
 			canSelectFiles: true, canSelectFolders: false, canSelectMany: false, filters: { JSON: ['json'] }, openLabel: 'Preview progress import'
 		});
 		if (!files?.[0]) { return; }
+		this.requireActive();
 		const input = await readJsonFile(localFile(files[0]), 2 * 1024 * 1024, 'Imported progress');
 		const data = record(input, 'Imported progress');
 		const preview = await this.serial(async () => {
@@ -557,6 +611,7 @@ class LearningExtension implements vscode.Disposable {
 			return { title: course.manifest.title, records: Object.keys(completions).length,
 				completed: Object.values(completions).filter(item => item.completedAt).length };
 		});
+		this.requireActive();
 		const answer = await vscode.window.showInformationMessage(`Import progress for ${preview.title}?`, {
 			modal: true, detail: `${preview.records} activity record(s), including ${preview.completed} completion(s).\n` +
 				'Existing completion is preserved. Imported claims are not locally verified. The imported position is used only for fresh local progress.'
@@ -568,6 +623,7 @@ class LearningExtension implements vscode.Disposable {
 			if (this.current?.course.id === id) { this.current = firstSelection(course, progress.position); }
 			await this.changed(course, progress);
 		});
+		this.requireActive();
 		await vscode.window.showInformationMessage('Progress imported. Existing completion was preserved.');
 	}
 
@@ -584,10 +640,12 @@ class LearningExtension implements vscode.Disposable {
 			if (unitId !== undefined && !unit) { throw new Error('Cannot reset an unknown unit.'); }
 			return unit ? `${unit.displayNumber} · ${unit.title}` : course.manifest.title;
 		});
+		this.requireActive();
 		const answer = await vscode.window.showWarningMessage(`Reset ${unitId === undefined ? 'all course' : 'unit'} progress for ${title}?`, {
 			modal: true, detail: 'This clears only the selected progress records and resets the position. Running checks for this course are cancelled. Lessons, notebooks, outputs, and other source files are not changed.'
 		}, 'Reset progress');
 		if (answer !== 'Reset progress') { return; }
+		this.requireActive();
 		// Synchronous invalidation happens BEFORE queuing/awaiting the reset transaction.
 		this.invalidate(id);
 		await this.serial(async () => {
@@ -598,6 +656,7 @@ class LearningExtension implements vscode.Disposable {
 			if (this.current?.course.id === id) { this.current = firstSelection(course, progress.position); }
 			await this.changed(course, progress);
 		});
+		this.requireActive();
 		await vscode.window.showInformationMessage('Progress reset. Source files were not changed.');
 	}
 
@@ -608,6 +667,7 @@ class LearningExtension implements vscode.Disposable {
 			modal: true, detail: 'Files and saved progress are retained. A course in a workspace root will be discovered again on refresh; remove that workspace folder to stop auto-discovery.'
 		}, 'Remove from list');
 		if (answer !== 'Remove from list') { return; }
+		this.requireActive();
 		this.invalidate(id);
 		await this.serial(async () => {
 			const course = this.course(id);
@@ -621,7 +681,9 @@ class LearningExtension implements vscode.Disposable {
 				}
 				if (registeredId !== id) { retained.push(item); }
 			}
+			this.requireActive();
 			await this.context.workspaceState.update('coursePaths', retained);
+			this.requireActive();
 			this.quizPanel.invalidateCourse(id);
 			this.courses.delete(id);
 			this.progress.delete(id);
@@ -631,12 +693,13 @@ class LearningExtension implements vscode.Disposable {
 			if (this.current?.course.id === id) { this.clearCurrent(); }
 			this.tree.setCourses([...this.courses.values()]);
 		});
+		this.requireActive();
 		await vscode.window.showInformationMessage('Removed from this list only. Files and progress retained; workspace-root courses return on refresh.');
 	}
 
 	private requireTrust(): void {
+		this.requireActive();
 		if (!vscode.workspace.isTrusted) { throw new Error('This action requires a trusted workspace.'); }
-		if (this.disposed) { throw new Error('Cert Learner has been disposed.'); }
 	}
 
 	private async onAction(action: string, input: Selection): Promise<void> {
@@ -670,6 +733,7 @@ class LearningExtension implements vscode.Disposable {
 				await this.changed(selection.course, progress);
 			} else if (action === 'lab') {
 				await this.openLab(selection);
+				this.requireActive();
 				void vscode.window.showInformationMessage('Choose a kernel in the native notebook editor and run cells yourself. Run All can include billable cloud operations or deletion cells. Opening the lab never executes code.');
 			} else if (action === 'quiz') {
 				if (!selection.unit.resources.quiz) { throw new Error('No quiz is declared for this unit.'); }
@@ -682,7 +746,9 @@ class LearningExtension implements vscode.Disposable {
 		if (!selection.unit.resources.lab) { throw new Error('No lab is declared for this unit.'); }
 		const file = await resolveResource(selection.course.root, selection.unit.resources.lab);
 		if (path.extname(file).toLowerCase() !== '.ipynb') { throw new Error('The lab must be a native Jupyter notebook.'); }
+		this.requireActive();
 		const notebook = await vscode.workspace.openNotebookDocument(vscode.Uri.file(file));
+		this.requireActive();
 		await vscode.window.showNotebookDocument(notebook);
 		return notebook;
 	}
@@ -695,6 +761,7 @@ class LearningExtension implements vscode.Disposable {
 			this.requireTrust();
 			return this.openLab(selection);
 		});
+		this.requireActive();
 		if (notebook.isDirty) { throw new Error('Save or revert existing notebook edits before clearing outputs. No changes were made.'); }
 		const version = notebook.version;
 		const answer = await vscode.window.showWarningMessage('Clear this lab’s outputs?', {
@@ -735,6 +802,7 @@ class LearningExtension implements vscode.Disposable {
 			edit.set(notebook.uri, [vscode.NotebookEdit.replaceCells(new vscode.NotebookRange(0, notebook.cellCount), cells)]);
 			if (!await vscode.workspace.applyEdit(edit)) { throw new Error('The notebook output edit was not applied.'); }
 		});
+		this.requireActive();
 		await vscode.window.showInformationMessage('Outputs cleared in the editor. Review the unsaved edit; Undo restores it.');
 	}
 
@@ -758,6 +826,7 @@ class LearningExtension implements vscode.Disposable {
 			this.running.get(ids.courseId) === run && (this.generations.get(ids.courseId) ?? 0) === run.generation &&
 			JSON.stringify(this.courses.get(ids.courseId)?.manifest) === manifest && vscode.workspace.isTrusted;
 		try {
+			if (!valid()) { return; }
 			await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'Cert Learner: course check', cancellable: true }, async (_progress, token) => {
 				const cancellation = token.onCancellationRequested(() => run.source.cancel());
 				try {
@@ -803,18 +872,24 @@ class LearningExtension implements vscode.Disposable {
 				await vscode.commands.executeCommand('workbench.action.chat.open', { query, isPartialQuery: true });
 				return;
 			}
-		} catch { this.output.appendLine('Chat UI unavailable; offering a contextual prompt instead.'); }
+		} catch {
+			if (this.disposed) { return; }
+			this.output.appendLine('Chat UI unavailable; offering a contextual prompt instead.');
+		}
+		this.requireActive();
 		const answer = await vscode.window.showInformationMessage('Chat is unavailable. Continue with the local lesson, or copy a contextual prompt to use yourself.', 'Copy prompt');
 		if (answer === 'Copy prompt') {
 			this.requireTrust();
 			await vscode.env.clipboard.writeText(`/${action} ${selection.activity.title}\nCourse: ${selection.course.manifest.title}\n` +
 				`Unit: ${selection.unit.displayNumber} · ${selection.unit.title}\nObjectives:\n${selection.activity.objectives.map(item => `- ${item}`).join('\n')}\n` +
 				'Use a read-only teaching explanation. Do not execute tools, invent references, or reveal quiz/lab solutions. No lesson text has been copied.');
+			this.requireActive();
 			await vscode.window.showInformationMessage('Contextual prompt copied. No model was invoked.');
 		}
 	}
 
 	private async tutor(request: vscode.ChatRequest, stream: vscode.ChatResponseStream, token: vscode.CancellationToken): Promise<void> {
+		if (this.disposed) { return; }
 		const source = new vscode.CancellationTokenSource();
 		const cancellation = token.onCancellationRequested(() => source.cancel());
 		this.tutors.add(source);
@@ -834,20 +909,24 @@ class LearningExtension implements vscode.Disposable {
 					return structuredClone(selection);
 				});
 			} catch (error) {
+				if (this.disposed) { return; }
 				// Local core diagnostics stay visible locally, never in a model request or chat response.
 				this.report(error);
 				stream.markdown('The selected activity or its progress is unavailable. Open an activity or check the local Cert Learner output channel. No lesson was sent.');
 				return;
 			}
+			this.requireActive();
 			if (typeof request.model?.sendRequest !== 'function') { stream.markdown(fallback); return; }
 			const answer = await vscode.window.showInformationMessage('Share this lesson with selected model?', {
 				modal: true, detail: `${snapshot.course.manifest.title}\n${snapshot.unit.displayNumber} · ${snapshot.unit.title}\n${snapshot.activity.title}\n\n` +
 					'Only up to 18,000 characters of this declared lesson, current objectives/titles, and course-declared HTTPS references will be sent. No other files, lab outputs, quiz files, chat history, or attached context are read or shared. This request keeps this activity snapshot if you navigate elsewhere.'
 			}, 'Share lesson');
+			if (this.disposed) { return; }
 			if (answer !== 'Share lesson' || source.token.isCancellationRequested) { stream.markdown(fallback); return; }
 			this.requireTrust();
 			let lesson: string;
 			try { lesson = await tutorLesson(snapshot); } catch (error) {
+				if (this.disposed) { return; }
 				this.report(error);
 				stream.markdown('The declared lesson could not be safely read. No lesson was sent. Continue locally or reopen the activity.'); return;
 			}
@@ -900,7 +979,7 @@ class LearningExtension implements vscode.Disposable {
 		}
 	}
 
-	private scheduleRefresh(): void {
+	scheduleRefresh(): void {
 		if (this.disposed) { return; }
 		if (this.timer) { clearTimeout(this.timer); }
 		this.timer = setTimeout(() => { this.timer = undefined; void this.ui(() => this.refresh()); }, 200);
@@ -918,11 +997,12 @@ class LearningExtension implements vscode.Disposable {
 	dispose(): void {
 		if (this.disposed) { return; }
 		this.disposed = true;
+		this.lifetime.abort();
 		if (this.timer) { clearTimeout(this.timer); }
 		for (const [id, run] of this.running) { this.invalidate(id); run.source.dispose(); }
 		for (const source of this.tutors) { source.cancel(); source.dispose(); }
 		for (const disposable of [...this.watchers, ...this.listeners, this.panel, this.pagePanel, this.quizPanel, this.view, this.tree, this.output]) {
-			try { disposable.dispose(); } catch { /* Dispose remaining resources even if the editor is already closing. */ }
+			try { disposable?.dispose(); } catch { /* Also clean up partially constructed sessions. */ }
 		}
 		this.watchers = [];
 	}
@@ -938,32 +1018,104 @@ export interface CertLearnerApi {
 	/** Detached registry snapshots for local integration clients (includes local course roots). */
 	getCourses(): Course[];
 	/** Public summary only: no filesystem paths, lesson bodies, credentials, or outputs. */
-	getState(): ReturnType<LearningExtension['getState']>;
+	getState(): Promise<Awaited<ReturnType<LearningExtension['getState']>> & { unavailable?: string }>;
 }
 
-let active: LearningExtension | undefined;
+/** Own exactly one mode and one folder listener; clients retain the same API. */
+class WorkspaceLifecycle implements vscode.Disposable {
+	private mode: LearningExtension | UnsupportedWorkspace;
+	private readonly folders: vscode.Disposable;
+	private disposed = false;
+	private reloadRequired = false;
+	readonly api: CertLearnerApi = {
+		refresh: () => this.expose(mode => mode.refresh()),
+		addCourse: input => this.expose(mode => mode.addCourse(input)),
+		openPage: input => this.expose(mode => mode.openPage(input)),
+		openUnitResource: (input, kind) => this.expose(mode => mode.openUnitResource(input, kind)),
+		getCourses: () => this.disposed ? [] : this.mode.getCourses(),
+		getState: () => this.expose(mode => mode.getState())
+	};
+
+	constructor(private readonly context: vscode.ExtensionContext, private readonly storage: vscode.Uri) {
+		this.mode = this.createMode();
+		try {
+			this.folders = vscode.workspace.onDidChangeWorkspaceFolders(() => this.workspaceChanged());
+		} catch (error) { this.mode.dispose(); throw error; }
+	}
+
+	private createMode(): LearningExtension | UnsupportedWorkspace {
+		return needsLocalWorkspace(this.context, this.storage) ? new UnsupportedWorkspace() :
+			new LearningExtension(this.context, localFile(this.storage));
+	}
+
+	private async expose<T>(work: (mode: CertLearnerApi) => Promise<T>): Promise<T> {
+		if (this.disposed) { throw new Error('Cert Learner has been disposed.'); }
+		const mode = this.mode;
+		try { return await work(mode); } catch (error) {
+			if (mode instanceof LearningExtension) { mode.report(error); }
+			throw error;
+		}
+	}
+
+	async initialize(): Promise<void> {
+		const mode = this.mode;
+		if (!(mode instanceof LearningExtension)) { return; }
+		try { await mode.refresh(); } catch (error) {
+			// A folder event may retire the initial session while its read is pending.
+			if (this.disposed || mode !== this.mode) { return; }
+			mode.report(error);
+			throw error;
+		}
+	}
+
+	private workspaceChanged(): void {
+		if (this.disposed || this.reloadRequired) { return; }
+		const unsupported = needsLocalWorkspace(this.context, this.storage);
+		if (unsupported === (this.mode instanceof UnsupportedWorkspace)) {
+			if (this.mode instanceof LearningExtension) { this.mode.scheduleRefresh(); }
+			return;
+		}
+		// No await between retirement and replacement: commands cannot overlap, and
+		// pending work retains the disposed session rather than targeting the new one.
+		this.mode.dispose();
+		try { this.mode = this.createMode(); } catch {
+			this.reloadRequired = true;
+			this.mode = new UnsupportedWorkspace();
+			void Promise.resolve(vscode.window.showErrorMessage(
+				'Cert Learner could not restart after the workspace changed. Learning is disabled; reload the window to retry.', 'Reload Window'
+			)).then(answer => {
+				if (!this.disposed && answer === 'Reload Window') { return vscode.commands.executeCommand('workbench.action.reloadWindow'); }
+				return undefined;
+			}).catch(() => undefined);
+			return;
+		}
+		if (this.mode instanceof LearningExtension) {
+			const mode = this.mode;
+			void mode.refresh().catch(error => mode.report(error));
+		}
+	}
+
+	dispose(): void {
+		if (this.disposed) { return; }
+		this.disposed = true;
+		try { this.folders.dispose(); } finally { this.mode.dispose(); }
+	}
+}
+
+let active: WorkspaceLifecycle | undefined;
 
 export async function activate(context: vscode.ExtensionContext): Promise<CertLearnerApi> {
+	// Keep the original storage location across folder changes; never migrate data.
 	const storage = context.storageUri ?? vscode.Uri.joinPath(context.globalStorageUri, 'local');
-	let extension: LearningExtension;
-	try { extension = new LearningExtension(context, localFile(storage)); } catch (error) {
+	let lifecycle: WorkspaceLifecycle;
+	try { lifecycle = new WorkspaceLifecycle(context, storage); } catch (error) {
 		await vscode.window.showErrorMessage(`Cert Learner could not activate: ${error instanceof Error ? error.message : 'Local storage or UI unavailable.'}`);
 		throw error;
 	}
-	active = extension;
-	context.subscriptions.push(extension);
-	const expose = async <T>(work: () => Promise<T>): Promise<T> => {
-		try { return await work(); } catch (error) { extension.report(error); throw error; }
-	};
-	await expose(() => extension.refresh());
-	return {
-		refresh: () => expose(() => extension.refresh()),
-		addCourse: input => expose(() => extension.addCourse(input)),
-		openPage: input => expose(() => extension.openPage(input)),
-		openUnitResource: (input, kind) => expose(() => extension.openUnitResource(input, kind)),
-		getCourses: () => extension.getCourses(),
-		getState: () => expose(() => extension.getState())
-	};
+	active = lifecycle;
+	context.subscriptions.push(lifecycle);
+	await lifecycle.initialize();
+	return lifecycle.api;
 }
 
 export function deactivate(): void { active?.dispose(); active = undefined; }

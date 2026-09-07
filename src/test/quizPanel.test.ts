@@ -1,6 +1,6 @@
 import * as assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
@@ -8,6 +8,7 @@ import { pathToFileURL } from 'node:url';
 import { runInNewContext, runInThisContext } from 'node:vm';
 import { afterEach, beforeEach, describe, it } from 'mocha';
 import type * as vscode from 'vscode';
+import { contributes } from '../../package.json';
 import { loadCourse } from '../core/course';
 import type { Course, CourseManifest } from '../core/course';
 import type { Quiz, QuizSelection } from '../core/quiz';
@@ -27,6 +28,10 @@ function subscribe<T>(listeners: Set<T>, listener: T): vscode.Disposable {
 }
 interface UriValue { scheme: string; fsPath: string; toString(): string }
 const uri = (fsPath: string): UriValue => ({ scheme: 'file', fsPath, toString: () => pathToFileURL(fsPath).href });
+const virtualUri = (): UriValue => ({
+	scheme: 'agent-host-copilotcli', toString: () => 'agent-host-copilotcli:/workspace',
+	get fsPath(): never { throw new Error('Virtual paths must never reach the filesystem'); }
+});
 type Receiver = (message: unknown) => void;
 
 class CapturedPanel {
@@ -210,27 +215,53 @@ describe('interactive quiz: actual compiled host panel', function () {
 	/** Real parent registry, queue, progress store, and quiz panel. Unrelated activity
 	 * UI/check/GitHub adapters are inert; no global require cache or VS Code patching.
 	 */
-	async function parent(course: Course) {
+	async function parent(course: Course, options: { folders?: UriValue[]; storage?: UriValue; failCommand?: string } = {}) {
 		const commands = new Map<string, (input?: unknown) => Promise<unknown>>();
 		const picks: { choices: { id?: string; unitId?: string }[]; title: string }[] = [];
 		let pick: (choices: { id?: string; unitId?: string }[]) => Promise<unknown> = async choices => choices[0];
+		let openDocument: (value: UriValue) => Promise<UriValue> = async value => value;
+		let failCommand = options.failCommand;
 		const documents: string[] = [];
+		const effects: string[] = [];
+		const folderListeners = new Set<() => void>();
+		const watchers = new Set<object>();
+		const outputs = new Set<object>();
+		const views: { disposed: boolean; message?: string; provider: vscode.TreeDataProvider<vscode.TreeItem> }[] = [];
+		const actions: ((action: string, selected: unknown) => Promise<unknown>)[] = [];
+		const stateAccess: string[] = [];
 		const noop = () => ({ dispose: () => undefined });
 		const editor = {
 			...host.api,
+			UIKind: { Desktop: 1, Web: 2 },
+			TreeItemCollapsibleState: { None: 0 },
+			TreeItem: class { constructor(readonly label: string, readonly collapsibleState: number) {} },
 			commands: { registerCommand: (id: string, callback: (input?: unknown) => Promise<unknown>) => {
+				if (failCommand === id) { failCommand = undefined; throw new Error('EXPECTED_REGISTRATION_FAILURE'); }
+				assert.equal(commands.has(id), false, `No overlapping command registrations: ${id}`);
 				commands.set(id, callback); return { dispose: () => commands.delete(id) };
-			} },
+			}, executeCommand: async (id: string) => { effects.push(id); } },
 			workspace: {
-				workspaceFolders: [], isTrusted: false,
-				onDidChangeWorkspaceFolders: noop,
-				createFileSystemWatcher: () => ({ dispose: () => undefined, onDidCreate: noop, onDidChange: noop, onDidDelete: noop }),
-				openTextDocument: async (value: UriValue) => value
+				workspaceFolders: (options.folders ?? []).map(uri => ({ uri })), isTrusted: false,
+				onDidChangeWorkspaceFolders: (listener: () => void) => subscribe(folderListeners, listener),
+				createFileSystemWatcher: () => {
+					const watcher = { dispose: () => { watchers.delete(watcher); }, onDidCreate: noop, onDidChange: noop, onDidDelete: noop };
+					watchers.add(watcher); return watcher;
+				},
+				openTextDocument: (value: UriValue) => openDocument(value),
+				openNotebookDocument: async () => { effects.push('openNotebookDocument'); throw new Error('Unexpected notebook access'); }
 			},
 			RelativePattern: class {},
 			window: { ...host.api.window,
-				createOutputChannel: () => ({ appendLine: () => undefined, dispose: () => undefined }),
-				createTreeView: noop,
+				createOutputChannel: () => {
+					const output = { appendLine: () => undefined, dispose: () => { outputs.delete(output); } };
+					outputs.add(output); return output;
+				},
+				createTreeView: (_id: string, options: { treeDataProvider: vscode.TreeDataProvider<vscode.TreeItem> }) => {
+					assert.equal(views.some(view => !view.disposed), false, 'Retire the old tree before creating the next');
+					const view = { disposed: false, provider: options.treeDataProvider, dispose: () => { view.disposed = true; } };
+					views.push(view); return view;
+				},
+				showOpenDialog: async () => { effects.push('showOpenDialog'); return undefined; },
 				showWarningMessage: host.api.window.showInformationMessage,
 				showTextDocument: async (value: UriValue) => { documents.push(value.fsPath); },
 				showQuickPick: async (choices: { id?: string; unitId?: string }[], options: { title: string }) => {
@@ -241,21 +272,281 @@ describe('interactive quiz: actual compiled host panel', function () {
 		class InertPanel { async show(): Promise<void> {} dispose(): void {} }
 		const module = loadModule('../extension.js', {
 			vscode: editor, './ui/quizPanel': loadPanel(host),
-			'./ui/panel': { ActivityPanel: InertPanel }, './ui/coursePage': { CoursePagePanel: InertPanel },
+			'./unsupportedWorkspace': loadModule('../unsupportedWorkspace.js', { vscode: editor }),
+			'./ui/panel': { ActivityPanel: class extends InertPanel {
+				constructor(_context: unknown, action: (action: string, selected: unknown) => Promise<unknown>) { super(); actions.push(action); }
+			} }, './ui/coursePage': { CoursePagePanel: InertPanel },
 			'./ui/tree': { CourseTree: class { setCourses(): void {} refresh(): void {} dispose(): void {} } },
-			'./runner': {}, './githubCourse': {}
+			'./runner': { runCheck: async () => { effects.push('runCheck'); } },
+			'./githubCourse': { cloneGitHubCourse: async () => { effects.push('cloneGitHubCourse'); } }
 		}) as typeof import('../extension');
 		const values = new Map<string, unknown>([['coursePaths', [path.join(course.root, 'course.json')]]]);
-		const api: CertLearnerApi = await module.activate({
-			...context, storageUri: uri(path.join(temporary, 'state')), subscriptions: extensionDisposables,
-			workspaceState: { get: (key: string, fallback: unknown) => values.get(key) ?? fallback,
-				update: async (key: string, value: unknown) => { values.set(key, value); } }
-		} as unknown as vscode.ExtensionContext);
-		return { api, commands, picks, documents,
+		const activationContext = {
+			...context, storageUri: options.storage ?? uri(path.join(temporary, 'state')), subscriptions: extensionDisposables,
+			workspaceState: { get: (key: string, fallback: unknown) => { stateAccess.push(`get:${key}`); return values.get(key) ?? fallback; },
+				update: async (key: string, value: unknown) => { stateAccess.push(`update:${key}`); values.set(key, value); } }
+		};
+		const api: CertLearnerApi = await module.activate(activationContext as unknown as vscode.ExtensionContext);
+		return { api, commands, picks, documents, effects, folderListeners, watchers, outputs, views, actions, stateAccess, values,
+			deactivate: () => module.deactivate(),
+			changeFolders: (...folders: UriValue[]) => {
+				editor.workspace.workspaceFolders = folders.map(uri => ({ uri }));
+				for (const listener of [...folderListeners]) { listener(); }
+			},
+			setStorage: (storage: UriValue) => { activationContext.storageUri = storage; },
+			failNextCommand: (id: string) => { failCommand = id; },
 			setPick: (callback: typeof pick) => { pick = callback; },
+			setOpenDocument: (callback: typeof openDocument) => { openDocument = callback; },
 			unregister: () => { values.set('coursePaths', []); }
 		};
 	}
+
+	async function savedFiles(): Promise<[string, string][]> {
+		const files = await readdir(temporary, { recursive: true, withFileTypes: true });
+		const entries = await Promise.all(files.filter(entry => entry.isFile()).map(async entry => {
+			const file = path.join(entry.parentPath, entry.name);
+			return [path.relative(temporary, file), await readFile(file, 'utf8')] as [string, string];
+		}));
+		return entries.sort(([a], [b]) => a.localeCompare(b));
+	}
+
+	it('folder removal retires learning before recovery, fencing queued mutations, old handlers and pending quiz dialogs', async () => {
+		const course = await fixture();
+		const second = await fixture('second');
+		const virtual = virtualUri();
+		const owner = await parent(course, { folders: [virtual, uri(course.root)] });
+		const { api, commands, changeFolders } = owner;
+		const ids = { courseId: course.id, unitId: 'unit', activityId: 'read' };
+		await commands.get('certLearner.open')!(ids);
+		const selected = { course, unit: course.manifest.units[0], activity: course.manifest.units[0].activities[0] };
+		await owner.actions[0]('complete', selected);
+		await api.openUnitResource(ids, 'quiz');
+		const panel = host.latest;
+		await submit(panel, ['A']);
+		const state = await api.getState();
+		const before = await savedFiles();
+		const registrations = [...owner.values];
+		const oldCommands = new Map(commands);
+		const oldReceive = [...panel.receivers][0];
+		const oldSource = panel.message('source');
+		const confirmation = deferred<void>(); const answer = deferred<string | undefined>();
+		host.confirm = async () => { confirmation.resolve(); return answer.promise; };
+		panel.receive(panel.message('link', { href: 'https://example.com/guide?a=1&b=2' }));
+		await confirmation.promise;
+		const accesses = owner.stateAccess.length;
+		const notices = host.confirmations.length;
+		const queuedRefresh = assert.rejects(api.refresh(), /disposed/u);
+		const queuedAdd = assert.rejects(api.addCourse(second.root), /disposed/u);
+		const queuedOpen = oldCommands.get('certLearner.open')!(ids);
+		const queuedComplete = owner.actions[0]('complete', selected);
+		changeFolders(virtual);
+		assert.equal(panel.disposed, true, 'Retire quiz and its attempts synchronously');
+		assert.equal(owner.outputs.size, 0);
+		assert.equal(owner.watchers.size, 0);
+		assert.equal(owner.folderListeners.size, 1, 'Only the coordinator owns the folder subscription');
+		assert.equal(owner.views[0].disposed, true);
+		assert.match(owner.views.at(-1)!.message!, /local desktop folder/u);
+		assert.deepEqual([...commands.keys()].sort(), contributes.commands.map(item => item.command).sort());
+		const recovery = await api.getState();
+		assert.deepEqual(recovery.courses, []);
+		assert.equal(recovery.current, undefined);
+		assert.match(recovery.unavailable!, /local desktop folder/u);
+		assert.deepEqual(await commands.get('certLearner.getState')!(), recovery);
+		assert.deepEqual(api.getCourses(), []);
+		await assert.rejects(api.openUnitResource(ids, 'quiz'), /local desktop folder/u);
+		await assert.rejects(api.openPage({ courseId: course.id, pageId: 'overview' }), /local desktop folder/u);
+		await assert.rejects(api.addCourse(second.root), /local desktop folder/u);
+		await assert.rejects(api.refresh(), /local desktop folder/u);
+		for (const command of oldCommands.values()) { await command(ids); }
+		oldReceive(oldSource);
+		answer.resolve('Open website');
+		await Promise.all([queuedRefresh, queuedAdd, queuedOpen, queuedComplete]);
+		await drain();
+		assert.equal(host.confirmations.length, notices, 'No transition popup or stale command dialogs');
+		assert.equal(owner.stateAccess.length, accesses, 'Recovery and retired queues never access registrations');
+		assert.deepEqual([...owner.values], registrations);
+		assert.deepEqual(await savedFiles(), before, 'No course or progress bytes changed');
+		assert.deepEqual(owner.effects, []);
+		assert.deepEqual(owner.documents, []);
+		assert.deepEqual(host.external, []);
+		assert.equal(host.panels.length, 1);
+		changeFolders(virtual, uri(course.root));
+		const restored = await api.getState();
+		assert.deepEqual(restored.courses, state.courses, 'The same progress is reopened, not relocated or reset');
+		assert.equal(restored.current, undefined, 'A new session does not reopen an old activity automatically');
+		await api.openUnitResource(ids, 'quiz');
+		assert.notEqual(host.latest, panel);
+		score(host.latest, 0, 0);
+		assert.deepEqual(await savedFiles(), before);
+	});
+
+	it('adding local roots upgrades the stable recovery API and leaves mixed/local folder edits in the same learning mode', async () => {
+		const course = await fixture();
+		const second = await fixture('second');
+		const virtual = virtualUri();
+		const owner = await parent(course, { folders: [virtual] });
+		const { getState, getCourses, openUnitResource, refresh } = owner.api;
+		assert.ok((await getState()).unavailable);
+		assert.deepEqual(getCourses(), []);
+		assert.deepEqual(owner.stateAccess, []);
+		assert.equal(owner.outputs.size, 0);
+		assert.equal(owner.watchers.size, 0);
+		assert.deepEqual(host.confirmations, []);
+		const recoveryCommand = owner.commands.get('certLearner.addGitHub')!;
+		const recoveryTree = owner.views[0];
+		const children = await recoveryTree.provider.getChildren();
+		assert.equal(children?.length, 1);
+		assert.equal(children![0].command?.command, 'certLearner.add');
+		owner.setStorage(uri(path.join(temporary, 'do-not-relocate')));
+		owner.changeFolders(virtual, uri(course.root));
+		const state = await getState(); // Queues behind the automatic transition refresh.
+		assert.equal(state.unavailable, undefined);
+		assert.equal(state.courses.length, 1);
+		assert.deepEqual(getCourses().map(item => item.id), [course.id]);
+		assert.equal(recoveryTree.disposed, true);
+		assert.equal(owner.outputs.size, 1);
+		assert.equal(owner.watchers.size, 1);
+		assert.equal(owner.folderListeners.size, 1);
+		assert.deepEqual([...owner.commands.keys()].sort(), contributes.commands.map(item => item.command).sort());
+		await recoveryCommand();
+		assert.deepEqual(host.confirmations, [], 'Captured recovery handlers become inert');
+		const openQuiz = owner.commands.get('certLearner.openQuiz')!;
+		await openQuiz({ courseId: course.id, unitId: 'unit' });
+		await submit(host.latest, ['A']);
+		assert.deepEqual(await getState(), state);
+		owner.changeFolders(virtual, uri(course.root), uri(second.root));
+		assert.equal(owner.commands.get('certLearner.openQuiz'), openQuiz);
+		await refresh();
+		assert.equal(getCourses().length, 2);
+		score(host.latest, 1, 1);
+		owner.changeFolders(uri(course.root), uri(second.root));
+		await refresh();
+		assert.equal(owner.views.length, 2, 'Same-capability folder changes only refresh, never re-register');
+		assert.equal(owner.commands.get('certLearner.openQuiz'), openQuiz);
+		await openUnitResource({ courseId: second.id, unitId: 'unit' }, 'quiz');
+		assert.match(host.latest.webview.html, /second course/u);
+		await owner.commands.get('certLearner.open')!({ courseId: course.id, unitId: 'unit', activityId: 'read' });
+		// Opening the first activity matches fresh state and need not persist. Make
+		// an explicit completion change to verify the original storage location.
+		await owner.actions[0]('complete', { course, unit: course.manifest.units[0], activity: course.manifest.units[0].activities[0] });
+		assert.ok((await readdir(path.join(temporary, 'state'))).some(file => file.endsWith('.json')));
+		await assert.rejects(readdir(path.join(temporary, 'do-not-relocate')), { code: 'ENOENT' });
+		assert.deepEqual(owner.effects, []);
+		assert.deepEqual(owner.documents, []);
+		assert.deepEqual(host.confirmations, []);
+	});
+
+	it('folder transitions drop pending unit choices, reset confirmations and source-document handoffs', async () => {
+		const course = await fixture();
+		const owner = await parent(course);
+		const picked = deferred<void>(); const choice = deferred<unknown>();
+		owner.setPick(async choices => {
+			if ('unitId' in choices[0]) { picked.resolve(); return choice.promise; }
+			return choices[0];
+		});
+		const opening = owner.commands.get('certLearner.openQuiz')!();
+		await picked.promise;
+		const resetStarted = deferred<void>(); const resetAnswer = deferred<string | undefined>();
+		host.confirm = async () => { resetStarted.resolve(); return resetAnswer.promise; };
+		const resetting = owner.commands.get('certLearner.reset')!();
+		await resetStarted.promise;
+		await owner.api.openUnitResource({ courseId: course.id, unitId: 'unit' }, 'quiz');
+		const sourceStarted = deferred<void>(); const sourceDocument = deferred<UriValue>();
+		owner.setOpenDocument(async () => { sourceStarted.resolve(); return sourceDocument.promise; });
+		host.latest.receive(host.latest.message('source'));
+		await sourceStarted.promise;
+		const before = await savedFiles();
+		const notices = host.confirmations.length;
+		owner.changeFolders(virtualUri());
+		choice.resolve({ unitId: 'unit' });
+		resetAnswer.resolve('Reset progress');
+		sourceDocument.resolve(uri(path.join(course.root, 'quiz.md')));
+		await Promise.all([opening, resetting]);
+		await drain();
+		assert.deepEqual(await savedFiles(), before);
+		assert.deepEqual(owner.documents, []);
+		assert.deepEqual(owner.effects, []);
+		assert.equal(host.confirmations.length, notices);
+		assert.equal(host.panels.length, 1);
+		assert.equal(host.latest.disposed, true);
+	});
+
+	it('rapid folder changes retire a pending refresh; deactivate and context disposal remove the coordinator', async () => {
+		const course = await fixture();
+		const virtual = virtualUri();
+		const owner = await parent(course, { folders: [virtual] });
+		owner.changeFolders(virtual, uri(course.root));
+		owner.changeFolders(virtual); // Retire the queued initial refresh before it starts.
+		await drain();
+		assert.ok((await owner.api.getState()).unavailable);
+		assert.deepEqual(owner.stateAccess, []);
+		assert.equal(owner.watchers.size, 0);
+		owner.changeFolders(virtual, uri(course.root));
+		assert.equal((await owner.api.getState()).courses.length, 1);
+		owner.deactivate();
+		for (const item of extensionDisposables) { item.dispose(); }
+		assert.equal(owner.folderListeners.size, 0);
+		assert.equal(owner.commands.size, 0);
+		assert.equal(owner.watchers.size, 0);
+		assert.equal(owner.outputs.size, 0);
+		assert.ok(owner.views.every(view => view.disposed));
+		const accesses = owner.stateAccess.length;
+		owner.changeFolders(virtual);
+		owner.changeFolders(uri(course.root));
+		assert.equal(owner.commands.size, 0);
+		assert.equal(owner.stateAccess.length, accesses);
+		assert.deepEqual(owner.api.getCourses(), []);
+		await assert.rejects(owner.api.getState(), /disposed/u);
+	});
+
+	it('local folder addition cannot bypass nonlocal storage, and context-only disposal removes recovery handlers', async () => {
+		const course = await fixture();
+		const virtual = virtualUri();
+		const owner = await parent(course, { folders: [virtual], storage: virtual });
+		const handler = owner.commands.get('certLearner.openQuiz');
+		owner.changeFolders(virtual, uri(course.root));
+		assert.equal(owner.commands.get('certLearner.openQuiz'), handler);
+		assert.ok((await owner.api.getState()).unavailable);
+		assert.deepEqual(owner.stateAccess, []);
+		assert.deepEqual(owner.effects, []);
+		assert.equal(owner.outputs.size, 0);
+		assert.equal(owner.watchers.size, 0);
+		assert.deepEqual(host.confirmations, []);
+		for (const item of extensionDisposables) { item.dispose(); }
+		assert.equal(owner.folderListeners.size, 0);
+		assert.equal(owner.commands.size, 0);
+		assert.ok(owner.views.every(view => view.disposed));
+		owner.changeFolders(uri(course.root));
+		assert.equal(owner.commands.size, 0);
+	});
+
+	it('transition constructor failure releases partial registrations and leaves guarded recovery until reload', async () => {
+		const course = await fixture();
+		const virtual = virtualUri();
+		const owner = await parent(course, { folders: [virtual] });
+		owner.failNextCommand('certLearner.openPage');
+		owner.changeFolders(virtual, uri(course.root));
+		await drain();
+		host.expectError(/could not restart.*reload the window/u);
+		assert.deepEqual([...owner.commands.keys()].sort(), contributes.commands.map(item => item.command).sort());
+		assert.equal(owner.outputs.size, 0);
+		assert.equal(owner.watchers.size, 0);
+		assert.equal(owner.views.filter(view => !view.disposed).length, 1);
+		assert.deepEqual(owner.stateAccess, [], 'A partial constructor must not start refreshing');
+		assert.ok((await owner.api.getState()).unavailable);
+		await assert.rejects(owner.api.addCourse(course.root), /local desktop folder/u);
+		owner.changeFolders(virtual);
+		owner.changeFolders(virtual, uri(course.root));
+		assert.ok((await owner.api.getState()).unavailable, 'A failed transition stays guarded until reload');
+		assert.deepEqual(owner.effects, []);
+		assert.deepEqual(host.confirmations, []);
+	});
+
+	it('initial full constructor failures still reject activation with the original diagnostic', async () => {
+		const course = await fixture();
+		await assert.rejects(parent(course, { failCommand: 'certLearner.openPage' }), /EXPECTED_REGISTRATION_FAILURE/u);
+		host.expectError(/could not activate.*EXPECTED_REGISTRATION_FAILURE/u);
+	});
 
 	it('initial HTML exposes one public question, no answers/explanations, strict CSP and bundled assets only', async () => {
 		const panel = await show();

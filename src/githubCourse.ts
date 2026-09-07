@@ -11,22 +11,25 @@ import type { CredentialSetting } from './core/githubCourse';
 const GIT_HINT = 'Git could not finish. Ensure Git is installed and that you have repository access. For a private repository, sign in manually using Git/Git Credential Manager, then retry. Never paste tokens here.';
 class CloneError extends Error {}
 
-function requireTrust(): void {
+function requireActive(signal?: AbortSignal): void {
+	if (signal?.aborted) { throw new CloneError('Cloning cancelled.'); }
 	if (!vscode.workspace.isTrusted) { throw new CloneError('Cloning a course requires a trusted workspace.'); }
 }
 
-async function gitExecutable(): Promise<string> {
-	requireTrust();
+async function gitExecutable(signal: AbortSignal): Promise<string> {
+	requireActive(signal);
 	let executable = 'git';
 	try {
 		const extension = vscode.extensions.getExtension<{ getAPI(version: 1): { git: { path: string } } }>('vscode.git');
 		const api = extension && (extension.isActive ? extension.exports : await extension.activate());
 		executable = api?.getAPI(1).git.path || 'git';
 	} catch { /* Disabled/unavailable Git extension: use the user's installed Git on PATH. */ }
+	requireActive(signal);
 	if (executable !== 'git') {
 		try { assertGitPath(executable); } catch { throw new CloneError('Configure Git with a local native executable path in trusted user settings.'); }
 		if (/\.(?:cmd|bat|ps1)$/iu.test(executable) || !(await stat(executable)).isFile()) { throw new CloneError(GIT_HINT); }
 	}
+	requireActive(signal);
 	return executable;
 }
 
@@ -103,16 +106,18 @@ async function readCredentialSettings(executable: string, emptyDirectory: string
 	}
 }
 
-async function cloneConfirmed(context: vscode.ExtensionContext, url: string, parent: string, destination: string): Promise<string | undefined> {
+async function cloneConfirmed(context: vscode.ExtensionContext, url: string, parent: string, destination: string, signal?: AbortSignal): Promise<string | undefined> {
+	requireActive(signal);
 	return vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'Clone GitHub course', cancellable: true }, async (progress, token) => {
 		const controller = new AbortController();
 		let stopped = 'Cloning cancelled.';
 		const cancel = (): void => { controller.abort(); };
 		const subscription = token.onCancellationRequested(cancel);
+		signal?.addEventListener('abort', cancel, { once: true });
 		const lifetime = { dispose: cancel };
 		context.subscriptions.push(lifetime);
 		const timer = setTimeout(() => { stopped = 'Cloning timed out after 10 minutes.'; cancel(); }, 10 * 60 * 1000);
-		if (token.isCancellationRequested) { cancel(); }
+		if (token.isCancellationRequested || signal?.aborted) { cancel(); }
 		let temporary: string | undefined;
 		let created = false;
 		let result: string | undefined;
@@ -120,30 +125,37 @@ async function cloneConfirmed(context: vscode.ExtensionContext, url: string, par
 		let cleanupFailed = false;
 		const guard = (): void => {
 			if (controller.signal.aborted) { throw new CloneError(stopped); }
-			requireTrust();
+			requireActive(signal);
 		};
 		try {
 			guard();
-			if (await realpath(parent) !== parent || !(await stat(parent)).isDirectory()) { throw new CloneError('The selected parent folder changed. Choose it again.'); }
+			const canonicalParent = await realpath(parent);
+			guard();
+			if (canonicalParent !== parent || !(await stat(parent)).isDirectory()) { throw new CloneError('The selected parent folder changed. Choose it again.'); }
 			guard();
 			try { await mkdir(destination, { mode: 0o700 }); created = true; }
 			catch { throw new CloneError('Destination could not be created exclusively. Existing files or folders are never overwritten; choose a different parent folder.'); }
+			guard();
 			const original = await lstat(destination);
 			const checkDestination = async (): Promise<void> => {
 				guard();
 				const current = await lstat(destination);
+				guard();
 				if (!current.isDirectory() || current.isSymbolicLink() || current.dev !== original.dev || current.ino !== original.ino ||
 					await realpath(destination) !== destination) { throw new CloneError('The destination changed. Clone stopped to protect local files.'); }
 				guard();
 			};
 			await checkDestination();
+			guard();
 			assertGitPath(tmpdir());
 			temporary = await mkdtemp(path.join(tmpdir(), 'cert-learner-github-'));
+			guard();
 			const template = path.join(temporary, 'empty-template');
 			const globalConfig = path.join(temporary, 'empty.gitconfig');
 			await mkdir(template, { mode: 0o700 });
+			guard();
 			await writeFile(globalConfig, '', { flag: 'wx', mode: 0o600 });
-			const executable = await gitExecutable();
+			const executable = await gitExecutable(controller.signal);
 			await checkDestination();
 			const authSettings = await readCredentialSettings(executable, template, controller.signal);
 			await checkDestination();
@@ -155,8 +167,10 @@ async function cloneConfirmed(context: vscode.ExtensionContext, url: string, par
 			await checkDestination();
 			progress.report({ message: 'Validating the root course manifest…' });
 			try {
+				guard();
 				const manifest = path.join(destination, 'course.json');
 				const info = await lstat(manifest);
+				guard();
 				if (!info.isFile() || info.isSymbolicLink()) { throw new Error(); }
 				const course = await loadCourse(manifest);
 				if (course.root !== destination) { throw new Error(); }
@@ -172,9 +186,12 @@ async function cloneConfirmed(context: vscode.ExtensionContext, url: string, par
 			}
 			clearTimeout(timer);
 			subscription.dispose();
+			signal?.removeEventListener('abort', cancel);
 			const index = context.subscriptions.indexOf(lifetime);
 			if (index >= 0) { context.subscriptions.splice(index, 1); }
 		}
+		// A retired workspace mode must not surface stale dialogs or register a root.
+		if (signal?.aborted) { return undefined; }
 		if (controller.signal.aborted) { failure = stopped; }
 		if (!vscode.workspace.isTrusted) { failure = 'Cloning a course requires a trusted workspace.'; }
 		if (failure) {
@@ -182,45 +199,50 @@ async function cloneConfirmed(context: vscode.ExtensionContext, url: string, par
 		} else if (cleanupFailed) {
 			await vscode.window.showWarningMessage('The course was validated, but its temporary Git safety directory could not be removed.');
 		}
-		return failure ? undefined : result;
+		return failure || signal?.aborted ? undefined : result;
 	});
 }
 
-/** Caller registers the returned root; this function never executes course code or opens a workspace. */
-export async function cloneGitHubCourse(context: vscode.ExtensionContext): Promise<string | undefined> {
+/** Caller registers the returned root; this function never executes course code or opens a workspace.
+ * An optional owner signal retires the entire flow, including pending prompt results, silently.
+ */
+export async function cloneGitHubCourse(context: vscode.ExtensionContext, signal?: AbortSignal): Promise<string | undefined> {
 	try {
-		requireTrust();
+		requireActive(signal);
 		const input = await vscode.window.showInputBox({
 			title: 'Add Course from GitHub', placeHolder: 'https://github.com/owner/repo',
 			prompt: 'Repository URL, not a file or folder link. This version clones the default branch only. Do not enter credentials.',
 			ignoreFocusOut: true,
 			validateInput: value => { try { parseGitHubRepository(value); return undefined; } catch { return 'Use https://github.com/owner/repo, not a file, tree, or branch link. No credentials or URL parameters.'; } }
 		});
+		requireActive(signal);
 		if (input === undefined) { return undefined; }
 		let repository;
 		try { repository = parseGitHubRepository(input); } catch { throw new CloneError('Enter an HTTPS GitHub repository URL, not a file, tree, or branch link. Do not include credentials or URL parameters.'); }
-		requireTrust();
 		const selected = await vscode.window.showOpenDialog({ title: 'Choose an existing local parent folder', canSelectFolders: true,
 			canSelectFiles: false, canSelectMany: false, openLabel: 'Select parent folder' });
+		requireActive(signal);
 		if (!selected?.length) { return undefined; }
 		if (selected.length !== 1 || selected[0].scheme !== 'file' || selected[0].authority) { throw new CloneError('Choose an existing local parent folder. Remote and network folders are not supported.'); }
 		let parent: string;
 		try {
 			assertGitPath(selected[0].fsPath);
 			parent = await realpath(selected[0].fsPath);
+			requireActive(signal);
 			assertGitPath(parent);
 			if (!(await stat(parent)).isDirectory()) { throw new Error(); }
 		} catch { throw new CloneError('Choose an existing local parent folder with a literal path, without environment/task variables.'); }
 		const destination = path.join(parent, repository.repo);
 		assertGitPath(destination);
-		requireTrust();
+		requireActive(signal);
 		const answer = await vscode.window.showInformationMessage('Clone this GitHub course?', { modal: true,
 			detail: `Repository: ${repository.url}\nExact destination: ${destination}\n\nDefault branch only, shallow clone. Existing destinations are refused. No fetched code, hooks, filters, submodules, or requirements are run. Only selected authentication settings (credential helper, useHttpPath, and username, including URL-scoped settings) from system/global Git configuration are used for cloning. Git applies URL scoping. Your trusted user-installed Git credential helpers may run for authentication (including shell helpers). These authentication settings are not used for checkout; other system/global Git settings are not used for cloning or checkout. Failed/cancelled clones remain unregistered for manual review.`
 		}, 'Clone course');
+		requireActive(signal);
 		if (answer !== 'Clone course') { return undefined; }
-		requireTrust();
-		return await cloneConfirmed(context, repository.url, parent, destination);
+		return await cloneConfirmed(context, repository.url, parent, destination, signal);
 	} catch (error) {
+		if (signal?.aborted) { return undefined; }
 		await vscode.window.showWarningMessage(error instanceof CloneError ? error.message : GIT_HINT);
 		return undefined;
 	}
