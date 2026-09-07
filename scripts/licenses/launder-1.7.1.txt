@@ -1,0 +1,53 @@
+Package: launder@1.7.1
+Published metadata: https://registry.npmjs.org/launder/1.7.1
+Published license: MIT
+Published author: Apostrophe Technologies, Inc.
+Release tag: https://github.com/apostrophecms/apostrophe/releases/tag/launder%401.7.1
+Release tag object: https://api.github.com/repos/apostrophecms/apostrophe/git/tags/a5dde2fad9486a23b770b096e51af6b9406e38e8
+Release commit: e9b0ab0849a5dfea0f75335fbdf99b5c6bf9e4b3
+Package manifest: https://github.com/apostrophecms/apostrophe/blob/e9b0ab0849a5dfea0f75335fbdf99b5c6bf9e4b3/packages/launder/package.json
+License source: https://raw.githubusercontent.com/apostrophecms/apostrophe/e9b0ab0849a5dfea0f75335fbdf99b5c6bf9e4b3/packages/apostrophe/LICENSE.md
+Source SHA-256: fd8fe2fc75626c3b35be2b78129503cf09df127449b07c5fbf4c1713e3418390
+
+The published package and its upstream package directory omit a license file.
+The npm metadata and release manifest declare MIT and the author shown above.
+The installed index.js was verified byte-for-byte against this release commit.
+The notice below is the upstream ApostropheCMS project's license at that commit,
+not a separately published launder-specific notice. The entire source text is
+preserved, including its supplemental vue-color notice; retaining that statement
+does not imply that launder bundles vue-color. No copyright attribution or year
+has been constructed from package metadata.
+
+--- BEGIN VERBATIM UPSTREAM LICENSE ---
+Copyright (c) 2021 Apostrophe Technologies, Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+Portions derived from vue-color require the following statement:
+
+MIT License
+
+Copyright (c) 2021 chenkai0520
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+--- END VERBATIM UPSTREAM LICENSE ---

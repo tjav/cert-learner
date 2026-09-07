@@ -1,0 +1,66 @@
+name: Release VSIX
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Test, package, and release
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+
+      - name: Require tag to match package version
+        run: |
+          node <<'NODE'
+          const { version } = require('./package.json');
+          if (process.env.GITHUB_REF_NAME !== 'v' + version) {
+            throw new Error('Release tag must exactly match v' + version);
+          }
+          NODE
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Build, lint, and run unit tests
+        run: npm test
+
+      - name: Run host integration tests
+        run: xvfb-run -a npm run test:integration
+
+      - name: Package VSIX
+        run: npm run vsix
+
+      - name: Calculate SHA-256 checksums
+        run: sha256sum cert-learner-*.vsix > SHA256SUMS
+
+      - name: Create GitHub Release with VSIX and checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME"
+          ./cert-learner-*.vsix ./SHA256SUMS
+          --verify-tag
+          --title "Cert Learner $GITHUB_REF_NAME"
+          --prerelease
+          --generate-notes

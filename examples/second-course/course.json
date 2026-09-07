@@ -1,0 +1,32 @@
+{
+  "format": "cert-learner",
+  "schemaVersion": 1,
+  "contentVersion": "1.0.0",
+  "courseId": "second-course",
+  "title": "Second course — independent progress demonstration",
+  "language": "en",
+  "resources": [
+    { "title": "Second course introduction", "path": "intro.md" }
+  ],
+  "units": [
+    {
+      "unitId": "second_course_intro",
+      "displayNumber": "01",
+      "title": "Navigate a separate course",
+      "domain": "Multiple-course learning workflow",
+      "resources": {
+        "lesson": "intro.md"
+      },
+      "activities": [
+        {
+          "activityId": "second_course_read",
+          "title": "Read the second introduction",
+          "objectives": [
+            "Distinguish progress in two separately identified local courses."
+          ],
+          "completion": "manual"
+        }
+      ]
+    }
+  ]
+}

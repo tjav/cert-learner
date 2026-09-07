@@ -1,0 +1,48 @@
+{
+  "format": "cert-learner",
+  "schemaVersion": 1,
+  "contentVersion": "1.0.0",
+  "courseId": "foundations",
+  "title": "Foundations — local learning demonstration",
+  "language": "en",
+  "resources": [
+    { "title": "Local reasoning quiz", "path": "quiz.md" }
+  ],
+  "units": [
+    {
+      "unitId": "foundations_start",
+      "displayNumber": "01",
+      "title": "Manual progress and a local check",
+      "domain": "Learning workflow demonstration",
+      "resources": {
+        "lesson": "lesson.md",
+        "quiz": "quiz.md"
+      },
+      "activities": [
+        {
+          "activityId": "intro",
+          "title": "Read and reason locally",
+          "objectives": [
+            "Explain why two groups of two items contain four items.",
+            "Distinguish self-reported progress from a passing local check."
+          ],
+          "completion": "manual"
+        },
+        {
+          "activityId": "local_verification",
+          "title": "Inspect and optionally run the demonstration check",
+          "objectives": [
+            "Identify the limited evidence provided by a local arithmetic check."
+          ],
+          "completion": "check",
+          "check": {
+            "runtime": "node",
+            "file": "check.cjs",
+            "cwd": ".",
+            "timeoutSeconds": 10
+          }
+        }
+      ]
+    }
+  ]
+}
