@@ -22,7 +22,7 @@
 
   const vscode = acquireVsCodeApi();
   const renderId = document.body.dataset.renderId;
-  const actions = new Set(["previous", "next", "complete", "lab", "quiz", "check", "explain", "hint", "reset", "outputs"]);
+  const actions = new Set(["previous", "next", "complete", "lab", "quiz", "check", "explain", "hint", "portal-walkthrough", "revert-unit", "source", "reset", "outputs"]);
   const buttons = Array.from(document.querySelectorAll("button[data-action]"));
   const disabled = new Map(buttons.map(button => [button, button.disabled]));
   const status = document.getElementById("action-status");

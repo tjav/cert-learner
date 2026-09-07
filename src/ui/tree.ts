@@ -1,11 +1,13 @@
 import * as vscode from 'vscode';
 import type { Activity, Course, Unit } from '../core/course';
+import { getCoursePages } from '../core/pages';
+import type { CoursePage } from '../core/pages';
 import { activityKey } from '../core/progress';
 import type { Progress } from '../core/progress';
 import { activityLabel, activityStatus, boundProgress, completionSummary, unitLabel } from './status';
 
 export type Selection = { course: Course; unit: Unit; activity: Activity };
-export type TreeEntry = { course: Course; unit?: Unit; activity?: Activity };
+export type TreeEntry = { course: Course; unit?: Unit; activity?: Activity; page?: CoursePage };
 
 export class CourseTree implements vscode.TreeDataProvider<TreeEntry>, vscode.Disposable {
 	private courses: Course[] = [];
@@ -23,21 +25,42 @@ export class CourseTree implements vscode.TreeDataProvider<TreeEntry>, vscode.Di
 
 	getChildren(entry?: TreeEntry): TreeEntry[] {
 		if (!entry) { return this.courses.map(course => ({ course })); }
-		if (entry.activity) { return []; }
+		if (entry.activity || entry.page) { return []; }
 		if (entry.unit) {
 			return entry.unit.activities.map(activity => ({ course: entry.course, unit: entry.unit, activity }));
 		}
-		return entry.course.manifest.units.map(unit => ({ course: entry.course, unit }));
+		const course = entry.course;
+		const pages = getCoursePages(course);
+		return [
+			...pages.filter(page => page.kind === 'overview').map(page => ({ course, page })),
+			...course.manifest.units.map(unit => ({ course, unit })),
+			...pages.filter(page => page.kind === 'reference').map(page => ({ course, page }))
+		];
 	}
 
 	getParent(entry: TreeEntry): TreeEntry | undefined {
+		if (entry.page) { return { course: entry.course }; }
 		if (entry.activity && entry.unit) { return { course: entry.course, unit: entry.unit }; }
 		if (entry.unit) { return { course: entry.course }; }
 		return undefined;
 	}
 
 	getTreeItem(entry: TreeEntry): vscode.TreeItem {
-		const { course, unit, activity } = entry;
+		const { course, unit, activity, page } = entry;
+		if (page) {
+			const item = new vscode.TreeItem(page.title, vscode.TreeItemCollapsibleState.None);
+			item.id = `certLearner.page:${JSON.stringify([course.id, page.id])}`;
+			item.contextValue = 'certLearner.page';
+			item.iconPath = new vscode.ThemeIcon(page.kind === 'overview' ? 'home' : 'file-text');
+			item.description = 'Reference · Not tracked';
+			item.tooltip = `${page.title}\nReference page · Not tracked. Opening this page never runs code or performs cleanup.`;
+			item.command = {
+				command: 'certLearner.openPage', title: 'Open course page',
+				arguments: [{ courseId: course.id, pageId: page.id }]
+			};
+			item.accessibilityInformation = { label: `${page.title}, ${item.description}` };
+			return item;
+		}
 		const progress = boundProgress(course, this.progress(course));
 		const stale = progress !== undefined && progress.contentVersion !== course.manifest.contentVersion;
 		const versionNote = stale

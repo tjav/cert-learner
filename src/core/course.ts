@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { realpath, stat } from 'node:fs/promises';
+import { lstat, realpath, stat } from 'node:fs/promises';
 import * as path from 'node:path';
 import Ajv from 'ajv';
 import courseSchema from '../../schemas/course.schema.json';
@@ -36,6 +36,7 @@ export interface CourseManifest {
 	courseId: string;
 	title: string;
 	units: Unit[];
+	overview?: string;
 	studyGuideUrl?: string;
 	studyGuideVersion?: string;
 	language?: string;
@@ -46,7 +47,11 @@ export interface CourseManifest {
 export interface Course {
 	id: string;
 	root: string;
+	/** Exact registered manifest when not the conventional root course.json. */
+	manifestPath?: string;
 	manifest: CourseManifest;
+	/** Validated root-relative overview path, including an automatically discovered README.md. */
+	overview?: string;
 }
 
 const MAX_MANIFEST_BYTES = 2 * 1024 * 1024;
@@ -149,6 +154,7 @@ export function validateManifest(input: unknown): CourseManifest {
 			}
 		}
 	}
+	if (manifest.overview !== undefined) { validateRelative(manifest.overview); }
 	for (const resource of manifest.resources ?? []) { validateRelative(resource.path); }
 	for (const url of [manifest.studyGuideUrl, ...(manifest.references ?? []).map(reference => reference.url)]) {
 		if (url !== undefined && !safeHttps(url)) { throw new Error('Course links must be safe HTTPS URLs without embedded credentials.'); }
@@ -161,6 +167,18 @@ export async function loadCourse(manifestPath: string): Promise<Course> {
 	const root = await realpath(path.dirname(canonicalManifest));
 	const manifest = validateManifest(await readJsonFile(canonicalManifest, MAX_MANIFEST_BYTES, 'Course manifest'));
 	const files = new Map<string, string | undefined>((manifest.resources ?? []).map(resource => [resource.path, '.md']));
+	let overview = manifest.overview;
+	if (overview === undefined) {
+		// Only absence is optional. lstat notices dangling links too, so resolving an
+		// unsafe or broken README below cannot be mistaken for a missing overview.
+		try {
+			await lstat(path.join(root, 'README.md'));
+			overview = 'README.md';
+		} catch (error) {
+			if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) { throw error; }
+		}
+	}
+	if (overview !== undefined) { files.set(overview, '.md'); }
 	const directories = new Set<string>();
 	for (const unit of manifest.units) {
 		files.set(unit.resources.lesson, '.md');
@@ -182,5 +200,6 @@ export async function loadCourse(manifestPath: string): Promise<Course> {
 	for (const directory of directories) { await resolveContained(root, directory, true); }
 	const identityRoot = process.platform === 'win32' ? root.toLowerCase() : root;
 	const id = createHash('sha256').update(JSON.stringify([identityRoot, manifest.courseId])).digest('hex');
-	return { id, root, manifest };
+	return { id, root, manifest, ...(overview === undefined ? {} : { overview }),
+		...(path.basename(canonicalManifest) === 'course.json' ? {} : { manifestPath: canonicalManifest }) };
 }

@@ -3,11 +3,16 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { loadCourse, resolveResource, safeHttps } from './core/course';
 import type { Course } from './core/course';
+import { buildActivityToolPrompt } from './core/activityTools';
+import type { ActivityTool } from './core/activityTools';
+import { getCoursePages } from './core/pages';
+import type { CoursePageSelection } from './core/pages';
 import { activityKey, exportProgress, parseLegacyProgress, parsePortableProgress, parseProgress, ProgressStore } from './core/progress';
 import type { Progress } from './core/progress';
 import { isErrno, readJsonFile, record } from './core/validation';
 import { runCheck } from './runner';
 import { ActivityPanel } from './ui/panel';
+import { CoursePagePanel } from './ui/coursePage';
 import { activityLabel, completionSummary } from './ui/status';
 import { CourseTree } from './ui/tree';
 import type { Selection } from './ui/tree';
@@ -106,6 +111,7 @@ class LearningExtension implements vscode.Disposable {
 	private readonly tree = new CourseTree(course => this.progress.get(course.id));
 	private readonly view = vscode.window.createTreeView('certLearner.courses', { treeDataProvider: this.tree });
 	private panel: ActivityPanel;
+	private readonly pagePanel: CoursePagePanel;
 	private readonly listeners: vscode.Disposable[] = [];
 	private watchers: vscode.Disposable[] = [];
 	private readonly running = new Map<string, RunningCheck>();
@@ -119,6 +125,12 @@ class LearningExtension implements vscode.Disposable {
 	constructor(private readonly context: vscode.ExtensionContext, private readonly storageDir: string) {
 		this.store = new ProgressStore(storageDir);
 		this.panel = this.createPanel();
+		this.pagePanel = new CoursePagePanel(context, selection => this.ui(async () => {
+			const fresh = this.resolvePage({ courseId: selection.course.id, pageId: selection.page.id });
+			const file = await resolveResource(fresh.course.root, fresh.page.path);
+			if (path.extname(file).toLowerCase() !== '.md') { throw new Error('Course pages must be Markdown.'); }
+			await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(vscode.Uri.file(file)), { preview: true });
+		}));
 		this.listeners.push(vscode.workspace.onDidChangeWorkspaceFolders(() => this.scheduleRefresh()));
 		this.command('add', async () => {
 			const folders = await vscode.window.showOpenDialog({
@@ -135,6 +147,9 @@ class LearningExtension implements vscode.Disposable {
 			if (id) { await this.resumeCourse(id); }
 		});
 		this.command('open', input => this.serial(() => this.openNow(positionOf(input))));
+		this.command('openPage', input => this.openPage(input));
+		this.command('portalWalkthrough', input => this.activityToolCommand(input, 'portal-walkthrough'));
+		this.command('revertUnit', input => this.activityToolCommand(input, 'revert-unit'));
 		this.command('sample', async () => {
 			const course = await this.addCourse(localFile(vscode.Uri.joinPath(context.extensionUri, 'examples', 'foundations', 'course.json')));
 			await this.resumeCourse(course.id);
@@ -208,6 +223,58 @@ class LearningExtension implements vscode.Disposable {
 		const progress = await this.store.read(course);
 		this.progress.set(course.id, progress);
 		return progress;
+	}
+
+	private resolvePage(input: unknown): CoursePageSelection {
+		const courseId = own(input, 'courseId');
+		const pageId = own(input, 'pageId');
+		if (typeof courseId !== 'string' || typeof pageId !== 'string') { throw new Error('Select a declared course page.'); }
+		const course = this.course(courseId);
+		const page = getCoursePages(course).find(candidate => candidate.id === pageId);
+		if (!page) { throw new Error('This page is not declared in the registered course. Refresh the course list.'); }
+		return { course, page };
+	}
+
+	openPage(input: unknown): Promise<void> {
+		// Reference pages neither replace the resume position nor mutate completion state.
+		return this.serial(async () => { await this.pagePanel.show(this.resolvePage(input)); });
+	}
+
+	private async activityToolCommand(input: unknown, tool: ActivityTool): Promise<void> {
+		const ids = input === undefined && this.current ? positionOf(this.current) : positionOf(input);
+		await this.openActivityTool(ids, tool);
+	}
+
+	private async openActivityTool(ids: Position, tool: ActivityTool): Promise<void> {
+		this.requireTrust();
+		const snapshot = await this.serial(async () => structuredClone(this.resolve(ids)));
+		const query = await buildActivityToolPrompt(snapshot, tool);
+		this.requireTrust();
+		const title = tool === 'portal-walkthrough' ? 'Portal walkthrough' : 'Revert unit';
+		const choice = await vscode.window.showInformationMessage(`Prepare ${title} for unit ${snapshot.unit.displayNumber}?`, {
+			modal: true,
+			detail: `${snapshot.course.manifest.title}\n${snapshot.unit.title}\n\n` +
+				'This prepares a draft for general Agent chat, not the read-only @certlearning tutor. It includes the selected course/prompt paths and unit metadata, but no file contents or credentials. Review and submit it yourself. Nothing runs or resets now.'
+		}, 'Prepare draft');
+		if (choice !== 'Prepare draft') { return; }
+		this.requireTrust();
+		const fresh = this.resolve(ids);
+		// Revalidate availability and context after the dialog; never substitute a newer activity.
+		if (await buildActivityToolPrompt(fresh, tool) !== query) { throw new Error('The course changed while confirming. Select the activity again.'); }
+		try {
+			if ((await vscode.commands.getCommands(true)).includes('workbench.action.chat.open')) {
+				this.requireTrust();
+				await vscode.commands.executeCommand('workbench.action.chat.open', { query, isPartialQuery: true });
+				const fallback = await vscode.window.showInformationMessage(`${title} draft prepared. If chat did not open, use Copy draft. Select general Agent mode (not @certlearning), review the context and submit. Nothing ran or reset.`, 'Copy draft');
+				if (fallback === 'Copy draft') { this.requireTrust(); await vscode.env.clipboard.writeText(query); }
+				return;
+			}
+		} catch { this.output.appendLine('General chat UI unavailable; offering draft copy.'); }
+		if (await vscode.window.showInformationMessage('Chat is unavailable. Copy the draft to use in general Agent chat?', 'Copy draft') === 'Copy draft') {
+			this.requireTrust();
+			await vscode.env.clipboard.writeText(query);
+			await vscode.window.showInformationMessage('Draft copied. No code ran and no progress changed.');
+		}
 	}
 
 	private paths(): string[] {
@@ -500,6 +567,7 @@ class LearningExtension implements vscode.Disposable {
 
 	private async onAction(action: string, input: Selection): Promise<void> {
 		const ids = positionOf(input);
+		if (action === 'portal-walkthrough' || action === 'revert-unit') { await this.openActivityTool(ids, action); return; }
 		if (action === 'check') { await this.check(ids); return; }
 		if (action === 'reset') {
 			this.resolve(ids);
@@ -781,7 +849,7 @@ class LearningExtension implements vscode.Disposable {
 		if (this.timer) { clearTimeout(this.timer); }
 		for (const [id, run] of this.running) { this.invalidate(id); run.source.dispose(); }
 		for (const source of this.tutors) { source.cancel(); source.dispose(); }
-		for (const disposable of [...this.watchers, ...this.listeners, this.panel, this.view, this.tree, this.output]) {
+		for (const disposable of [...this.watchers, ...this.listeners, this.panel, this.pagePanel, this.view, this.tree, this.output]) {
 			try { disposable.dispose(); } catch { /* Dispose remaining resources even if the editor is already closing. */ }
 		}
 		this.watchers = [];
@@ -791,6 +859,8 @@ class LearningExtension implements vscode.Disposable {
 export interface CertLearnerApi {
 	refresh(): Promise<void>;
 	addCourse(path: string): Promise<Course>;
+	/** Open only a registered reference page, without changing activity state. */
+	openPage(input: { courseId: string; pageId: string }): Promise<void>;
 	/** Detached registry snapshots for local integration clients (includes local course roots). */
 	getCourses(): Course[];
 	/** Public summary only: no filesystem paths, lesson bodies, credentials, or outputs. */
@@ -815,6 +885,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<CertLe
 	return {
 		refresh: () => expose(() => extension.refresh()),
 		addCourse: input => expose(() => extension.addCourse(input)),
+		openPage: input => expose(() => extension.openPage(input)),
 		getCourses: () => extension.getCourses(),
 		getState: () => expose(() => extension.getState())
 	};

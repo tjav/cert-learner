@@ -3,6 +3,7 @@
   "schemaVersion": 1,
   "contentVersion": "1.0.0",
   "courseId": "foundations",
+  "overview": "lesson.md",
   "title": "Foundations — local learning demonstration",
   "language": "en",
   "resources": [

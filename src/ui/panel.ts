@@ -1,6 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { open } from 'node:fs/promises';
 import * as vscode from 'vscode';
+import { availableActivityTools, resolveActivityTool } from '../core/activityTools';
 import { resolveResource, safeHttps } from '../core/course';
 import { activityKey } from '../core/progress';
 import type { Progress } from '../core/progress';
@@ -9,9 +10,9 @@ import { activityLabel, activityStatus, completionSummary, unitLabel } from './s
 import type { Selection } from './tree';
 
 const MAX_LESSON_BYTES = 1024 * 1024;
-const ACTIONS = ['previous', 'next', 'complete', 'lab', 'quiz', 'check', 'explain', 'hint', 'reset', 'outputs'] as const;
+const ACTIONS = ['previous', 'next', 'complete', 'lab', 'quiz', 'check', 'explain', 'hint', 'portal-walkthrough', 'revert-unit', 'reset', 'outputs'] as const;
 type Action = typeof ACTIONS[number];
-const TRUSTED_ACTIONS = new Set<Action>(['check', 'explain', 'hint', 'outputs']);
+const TRUSTED_ACTIONS = new Set<Action>(['check', 'explain', 'hint', 'portal-walkthrough', 'revert-unit', 'outputs']);
 
 interface RenderState {
 	id: string;
@@ -133,12 +134,13 @@ export class ActivityPanel implements vscode.Disposable {
 			panel.reveal(panel.viewColumn ?? vscode.ViewColumn.One);
 			panel.webview.html = this.document(panel.webview, generation, selection.activity.title,
 				'<main aria-busy="true"><h1>Loading lesson…</h1><p role="status">Reading local course content.</p></main>');
-			const [lesson, lab, quiz, check] = await Promise.all([
+			const [lesson, lab, quiz, check, tools] = await Promise.all([
 				readLesson(selection).then(source => ({ html: renderMarkdown(source), error: '' }),
 					(error: unknown) => ({ html: '', error: errorText(error) })),
 				available(selection, selection.unit.resources.lab),
 				available(selection, selection.unit.resources.quiz),
-				available(selection, selection.activity.check?.file)
+				available(selection, selection.activity.check?.file),
+				availableActivityTools(selection.course)
 			]);
 			if (this.disposed || this.generation !== generation || this.panel !== panel) { return; }
 			const activities = selection.course.manifest.units.flatMap(unit => unit.activities.map(activity => ({ unit, activity })));
@@ -155,6 +157,8 @@ export class ActivityPanel implements vscode.Disposable {
 				check: check ? undefined : 'No accessible check is declared for this activity.',
 				explain: lesson.error ? 'The lesson is unavailable.' : undefined,
 				hint: lesson.error ? 'The lesson is unavailable.' : undefined,
+				'portal-walkthrough': tools['portal-walkthrough'] ? undefined : 'This course does not provide an accessible Portal walkthrough prompt.',
+				'revert-unit': tools['revert-unit'] ? undefined : 'This course does not provide an accessible Revert unit prompt.',
 				reset: undefined,
 				outputs: lab ? undefined : 'No accessible lab is declared for this unit.'
 			};
@@ -212,7 +216,12 @@ export class ActivityPanel implements vscode.Disposable {
 			if (action === 'complete' && state.selection.activity.completion === 'check') { throw new Error('This activity requires a passing check.'); }
 			const resource = resourceForAction(action, state.selection);
 			if (resource) { await resolveResource(state.selection.course.root, resource); }
+			if (action === 'portal-walkthrough' || action === 'revert-unit') {
+				// Availability is advisory; revalidate the fixed prompt at dispatch, never via resolveResource.
+				await resolveActivityTool(state.selection.course, action);
+			}
 			if (!this.isCurrent(panel, state)) { return; }
+			if (TRUSTED_ACTIONS.has(action) && !vscode.workspace.isTrusted) { throw new Error('This action requires a trusted workspace.'); }
 			// Capture the selection from THIS render, never look it up after asynchronous work.
 			await this.onAction(action, state.selection);
 		} catch (error) {
@@ -288,13 +297,14 @@ ${versionWarning}
 ${activity.objectives.length ? `<ul>${activity.objectives.map(objective => `<li>${escapeHtml(objective)}</li>`).join('')}</ul>` : '<p class="muted">No objectives were declared for this activity.</p>'}
 </section>
 <aside class="notice" id="trust-notice" role="note">${vscode.workspace.isTrusted
-			? 'Trusted workspace. Checks, Explain, Hint, and clearing lab outputs are handled by the extension, with any required confirmations. This panel never runs code.'
-			: '<strong>Restricted Mode.</strong> Reading, navigation, manual completion, opening learning resources, and progress reset are permitted. Checks, Explain, Hint, and clearing lab outputs require a trusted workspace.'}</aside>
+			? 'Trusted workspace. Checks, Explain, Hint, Portal walkthrough, Revert unit, and clearing lab outputs are handled by the extension, with any required confirmations. This panel never runs code.'
+			: '<strong>Restricted Mode.</strong> Reading, navigation, manual completion, opening learning resources, and progress reset are permitted. Checks, Explain, Hint, Portal walkthrough, Revert unit, and clearing lab outputs require a trusted workspace.'}</aside>
 <section aria-labelledby="tools-heading">
 <h2 id="tools-heading">Activity tools</h2>
 <div class="actions" role="group" aria-label="Learning resources">
-${this.button(state, 'lab', 'Open lab')}${this.button(state, 'quiz', 'Open quiz')}${this.button(state, 'explain', 'Explain')}${this.button(state, 'hint', 'Hint')}
+${this.button(state, 'lab', 'Open lab')}${this.button(state, 'quiz', 'Open quiz')}${this.button(state, 'explain', 'Explain')}${this.button(state, 'hint', 'Hint')}${this.button(state, 'portal-walkthrough', 'Portal walkthrough')}${this.button(state, 'revert-unit', 'Revert unit')}
 </div>
+<p class="muted">Portal walkthrough and Revert unit open a DRAFT in general Agent mode. Review it and submit it yourself; preparing a draft changes nothing and never completes an activity. Revert can discard local work only after a verified baseline, backup, and your confirmation; it never touches cloud resources. Reset progress remains a separate maintenance action below.</p>
 <p class="muted">Unavailable resources are disabled. Labs open as native notebooks; opening a lab does not run cells. External lesson links require confirmation. Images and local links are not loaded.</p>
 </section>
 <article class="lesson" id="lesson" tabindex="-1" aria-labelledby="lesson-heading">
