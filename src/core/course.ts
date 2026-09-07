@@ -183,7 +183,7 @@ export async function loadCourse(manifestPath: string): Promise<Course> {
 	for (const unit of manifest.units) {
 		files.set(unit.resources.lesson, '.md');
 		if (unit.resources.lab) { files.set(unit.resources.lab, '.ipynb'); }
-		if (unit.resources.quiz) { files.set(unit.resources.quiz, '.md'); }
+		if (unit.resources.quiz) { files.set(unit.resources.quiz, path.extname(unit.resources.quiz).toLowerCase()); }
 		for (const activity of unit.activities) {
 			if (activity.check) {
 				if (!files.has(activity.check.file)) { files.set(activity.check.file, undefined); }

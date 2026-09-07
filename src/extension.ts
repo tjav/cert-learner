@@ -13,6 +13,8 @@ import { isErrno, readJsonFile, record } from './core/validation';
 import { runCheck } from './runner';
 import { ActivityPanel } from './ui/panel';
 import { CoursePagePanel } from './ui/coursePage';
+import { QuizPanel } from './ui/quizPanel';
+import { cloneGitHubCourse } from './githubCourse';
 import { activityLabel, completionSummary } from './ui/status';
 import { CourseTree } from './ui/tree';
 import type { Selection } from './ui/tree';
@@ -112,6 +114,7 @@ class LearningExtension implements vscode.Disposable {
 	private readonly view = vscode.window.createTreeView('certLearner.courses', { treeDataProvider: this.tree });
 	private panel: ActivityPanel;
 	private readonly pagePanel: CoursePagePanel;
+	private readonly quizPanel: QuizPanel;
 	private readonly listeners: vscode.Disposable[] = [];
 	private watchers: vscode.Disposable[] = [];
 	private readonly running = new Map<string, RunningCheck>();
@@ -125,6 +128,13 @@ class LearningExtension implements vscode.Disposable {
 	constructor(private readonly context: vscode.ExtensionContext, private readonly storageDir: string) {
 		this.store = new ProgressStore(storageDir);
 		this.panel = this.createPanel();
+		this.quizPanel = new QuizPanel(context, selection => this.ui(async () => {
+			const { course, unit } = this.resolveUnit({ courseId: selection.course.id, unitId: selection.unit.unitId });
+			if (!unit.resources.quiz) { throw new Error('No quiz is declared.'); }
+			const file = await resolveResource(course.root, unit.resources.quiz);
+			if (!/\.(md|json)$/iu.test(file)) { throw new Error('Unsupported quiz source.'); }
+			await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(vscode.Uri.file(file)), { preview: true });
+		}));
 		this.pagePanel = new CoursePagePanel(context, selection => this.ui(async () => {
 			const fresh = this.resolvePage({ courseId: selection.course.id, pageId: selection.page.id });
 			const file = await resolveResource(fresh.course.root, fresh.page.path);
@@ -133,6 +143,12 @@ class LearningExtension implements vscode.Disposable {
 		}));
 		this.listeners.push(vscode.workspace.onDidChangeWorkspaceFolders(() => this.scheduleRefresh()));
 		this.command('add', async () => {
+			const choice = await vscode.window.showQuickPick([
+				{ label: 'Local folder', description: 'Use a course already on this computer', source: 'local' },
+				{ label: 'GitHub repository', description: 'Clone a GitHub link into a new local folder', source: 'github' }
+			], { title: 'Add a certification course' });
+			if (!choice) { return; }
+			if (choice.source === 'github') { await this.addFromGitHub(); return; }
 			const folders = await vscode.window.showOpenDialog({
 				canSelectFiles: false, canSelectFolders: true, canSelectMany: false, openLabel: 'Add course folder'
 			});
@@ -141,6 +157,9 @@ class LearningExtension implements vscode.Disposable {
 				await this.resumeCourse(course.id);
 			}
 		});
+		this.command('addGitHub', () => this.addFromGitHub());
+		this.command('openLab', input => this.unitResourceCommand(input, 'lab'));
+		this.command('openQuiz', input => this.unitResourceCommand(input, 'quiz'));
 		this.command('refresh', () => this.refresh());
 		this.command('resume', async () => {
 			const id = await this.pickCourse();
@@ -223,6 +242,57 @@ class LearningExtension implements vscode.Disposable {
 		const progress = await this.store.read(course);
 		this.progress.set(course.id, progress);
 		return progress;
+	}
+
+	private async addFromGitHub(): Promise<void> {
+		const root = await cloneGitHubCourse(this.context);
+		if (!root || this.disposed) { return; }
+		this.requireTrust();
+		const course = await this.addCourse(root);
+		await this.resumeCourse(course.id);
+		await vscode.window.showInformationMessage('GitHub course cloned and added. No course code was run. Review the repository before running labs or checks.');
+	}
+
+	private resolveUnit(input: unknown) {
+		const courseId = own(input, 'courseId');
+		const unitId = own(input, 'unitId');
+		if (typeof courseId !== 'string' || typeof unitId !== 'string') { throw new Error('Select a registered course unit.'); }
+		const course = this.course(courseId);
+		const unit = course.manifest.units.find(candidate => candidate.unitId === unitId);
+		if (!unit) { throw new Error('The selected unit is no longer registered.'); }
+		return { course, unit };
+	}
+
+	private async unitResourceCommand(input: unknown, kind: 'lab' | 'quiz'): Promise<void> {
+		if (input === undefined) {
+			if (this.current) {
+				input = { courseId: this.current.course.id, unitId: this.current.unit.unitId };
+			} else {
+				// Dialogs never hold the registry queue. Resolve the chosen IDs again
+				// afterwards so a refresh/removal cannot substitute stale metadata.
+				const courseId = await this.pickCourse();
+				if (!courseId) { return; }
+				const units = this.course(courseId).manifest.units.map(unit => ({
+					label: `${unit.displayNumber} · ${unit.title}`, unitId: unit.unitId,
+					description: unit.resources[kind] ? `Open ${kind}` : `No ${kind} declared`
+				}));
+				const unit = await vscode.window.showQuickPick(units, { title: `Select a unit to open its ${kind}` });
+				if (!unit) { return; }
+				input = { courseId, unitId: unit.unitId };
+			}
+		}
+		await this.openUnitResource(input, kind);
+	}
+
+	openUnitResource(input: unknown, kind: 'lab' | 'quiz'): Promise<void> {
+		return this.serial(async () => {
+			const selected = this.resolveUnit(input);
+			if (kind === 'quiz') { await this.quizPanel.show(selected); }
+			else if (kind === 'lab') {
+				await this.openLab(selected);
+				void vscode.window.showInformationMessage('Lab opened without execution. Select your kernel and review billable and cleanup cells before running them.');
+			} else { throw new Error('Unknown unit resource.'); }
+		});
 	}
 
 	private resolvePage(input: unknown): CoursePageSelection {
@@ -335,7 +405,10 @@ class LearningExtension implements vscode.Disposable {
 		}
 		if (this.disposed) { return; }
 		for (const [id, old] of this.courses) {
-			if (JSON.stringify(old.manifest) !== JSON.stringify(next.get(id)?.manifest)) { this.invalidate(id); }
+			if (JSON.stringify(old.manifest) !== JSON.stringify(next.get(id)?.manifest)) {
+				this.invalidate(id);
+				this.quizPanel.invalidateCourse(id);
+			}
 		}
 		this.courses.clear();
 		this.progress.clear();
@@ -549,6 +622,7 @@ class LearningExtension implements vscode.Disposable {
 				if (registeredId !== id) { retained.push(item); }
 			}
 			await this.context.workspaceState.update('coursePaths', retained);
+			this.quizPanel.invalidateCourse(id);
 			this.courses.delete(id);
 			this.progress.delete(id);
 			for (const [file, registeredId] of this.registrations) {
@@ -599,14 +673,12 @@ class LearningExtension implements vscode.Disposable {
 				void vscode.window.showInformationMessage('Choose a kernel in the native notebook editor and run cells yourself. Run All can include billable cloud operations or deletion cells. Opening the lab never executes code.');
 			} else if (action === 'quiz') {
 				if (!selection.unit.resources.quiz) { throw new Error('No quiz is declared for this unit.'); }
-				const file = await resolveResource(selection.course.root, selection.unit.resources.quiz);
-				if (path.extname(file).toLowerCase() !== '.md') { throw new Error('The quiz must be Markdown.'); }
-				await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(vscode.Uri.file(file)), { preview: true });
+				await this.quizPanel.show(selection);
 			} else { throw new Error('Unknown activity action.'); }
 		});
 	}
 
-	private async openLab(selection: Selection): Promise<vscode.NotebookDocument> {
+	private async openLab(selection: Pick<Selection, 'course' | 'unit'>): Promise<vscode.NotebookDocument> {
 		if (!selection.unit.resources.lab) { throw new Error('No lab is declared for this unit.'); }
 		const file = await resolveResource(selection.course.root, selection.unit.resources.lab);
 		if (path.extname(file).toLowerCase() !== '.ipynb') { throw new Error('The lab must be a native Jupyter notebook.'); }
@@ -849,7 +921,7 @@ class LearningExtension implements vscode.Disposable {
 		if (this.timer) { clearTimeout(this.timer); }
 		for (const [id, run] of this.running) { this.invalidate(id); run.source.dispose(); }
 		for (const source of this.tutors) { source.cancel(); source.dispose(); }
-		for (const disposable of [...this.watchers, ...this.listeners, this.panel, this.pagePanel, this.view, this.tree, this.output]) {
+		for (const disposable of [...this.watchers, ...this.listeners, this.panel, this.pagePanel, this.quizPanel, this.view, this.tree, this.output]) {
 			try { disposable.dispose(); } catch { /* Dispose remaining resources even if the editor is already closing. */ }
 		}
 		this.watchers = [];
@@ -861,6 +933,8 @@ export interface CertLearnerApi {
 	addCourse(path: string): Promise<Course>;
 	/** Open only a registered reference page, without changing activity state. */
 	openPage(input: { courseId: string; pageId: string }): Promise<void>;
+	/** Resolve IDs against the registry only; open without execution or progress changes. */
+	openUnitResource(input: { courseId: string; unitId: string }, kind: 'lab' | 'quiz'): Promise<void>;
 	/** Detached registry snapshots for local integration clients (includes local course roots). */
 	getCourses(): Course[];
 	/** Public summary only: no filesystem paths, lesson bodies, credentials, or outputs. */
@@ -886,6 +960,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<CertLe
 		refresh: () => expose(() => extension.refresh()),
 		addCourse: input => expose(() => extension.addCourse(input)),
 		openPage: input => expose(() => extension.openPage(input)),
+		openUnitResource: (input, kind) => expose(() => extension.openUnitResource(input, kind)),
 		getCourses: () => extension.getCourses(),
 		getState: () => expose(() => extension.getState())
 	};

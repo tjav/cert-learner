@@ -1,0 +1,48 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://cert-learner.local/schemas/quiz.schema.json",
+  "title": "Cert Learner structured quiz",
+  "description": "Version 1 source-authored questions. IDs and answer membership are also checked by validateQuiz. Markdown is inert data; rendering must sanitize it.",
+  "type": "object",
+  "required": ["schemaVersion", "title", "questions"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "title": { "type": "string", "minLength": 1, "maxLength": 1024, "pattern": "\\S" },
+    "questions": {
+      "type": "array", "minItems": 1, "maxItems": 200,
+      "items": { "$ref": "#/definitions/question" }
+    }
+  },
+  "definitions": {
+    "id": {
+      "type": "string", "minLength": 1, "maxLength": 128,
+      "pattern": "^(?!\\s)(?![\\s\\S]*\\s$)[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "option": {
+      "type": "object", "required": ["id", "text"], "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/definitions/id" },
+        "text": { "type": "string", "minLength": 1, "maxLength": 8192, "pattern": "\\S" }
+      }
+    },
+    "question": {
+      "type": "object",
+      "required": ["id", "prompt", "options", "correctOptionIds", "explanation"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/definitions/id" },
+        "prompt": { "type": "string", "minLength": 1, "maxLength": 16384, "pattern": "\\S" },
+        "options": {
+          "type": "array", "minItems": 2, "maxItems": 8,
+          "items": { "$ref": "#/definitions/option" }
+        },
+        "correctOptionIds": {
+          "type": "array", "minItems": 1, "maxItems": 8, "uniqueItems": true,
+          "items": { "$ref": "#/definitions/id" }
+        },
+        "explanation": { "type": "string", "minLength": 1, "maxLength": 32768, "pattern": "\\S" }
+      }
+    }
+  }
+}

@@ -50,7 +50,7 @@
             "properties": {
               "lesson": { "$ref": "#/definitions/markdown" },
               "lab": { "type": "string", "minLength": 1, "maxLength": 1024, "pattern": "\\.[iI][pP][yY][nN][bB]$" },
-              "quiz": { "$ref": "#/definitions/markdown" }
+              "quiz": { "type": "string", "minLength": 1, "maxLength": 1024, "pattern": "\\.(?:[mM][dD]|[jJ][sS][oO][nN])$" }
             }
           },
           "activities": {

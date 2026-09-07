@@ -17,7 +17,7 @@
       "domain": "Learning workflow demonstration",
       "resources": {
         "lesson": "lesson.md",
-        "quiz": "quiz.md"
+        "quiz": "quiz.json"
       },
       "activities": [
         {

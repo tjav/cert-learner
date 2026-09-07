@@ -37,6 +37,26 @@ function assertPageTree(course: Course): void {
 		assert.equal(tree.getTreeItem(root).description, `0/${total} completed`, 'Pages do not count as activities');
 		for (const entry of children.filter(child => 'unit' in child)) {
 			assert.equal(tree.getTreeItem(entry).description, `0/${entry.unit!.activities.length} completed`);
+			const unit = entry.unit!;
+			const leaves = tree.getChildren(entry);
+			const resources = (['lab', 'quiz'] as const).filter(kind => unit.resources[kind]);
+			assert.equal(leaves.length, unit.activities.length + resources.length, 'Activities plus exactly the declared resources');
+			assert.deepEqual(leaves.filter(leaf => leaf.activity).map(leaf => leaf.activity), unit.activities);
+			const resourceLeaves = leaves.filter(leaf => leaf.resource);
+			assert.deepEqual(resourceLeaves.map(leaf => leaf.resource), resources);
+			const readsBefore: number = progressReads;
+			for (const leaf of resourceLeaves) {
+				const item = tree.getTreeItem(leaf);
+				assert.equal(item.label, leaf.resource === 'lab' ? 'Lab' : 'Quiz');
+				assert.equal(item.collapsibleState, vscode.TreeItemCollapsibleState.None);
+				assert.equal(item.contextValue, `certLearner.${leaf.resource}`);
+				assert.equal(item.command?.command, leaf.resource === 'lab' ? 'certLearner.openLab' : 'certLearner.openQuiz');
+				assert.deepEqual(item.command.arguments, [{ courseId: course.id, unitId: unit.unitId }]);
+				assert.deepEqual(tree.getChildren(leaf), []);
+				assert.deepEqual(tree.getParent(leaf), entry);
+				assert.match(String(item.tooltip), leaf.resource === 'lab' ? /without running any cells/u : /do not complete course activities/u);
+			}
+			assert.equal(progressReads, readsBefore, 'Resource leaves never consult or contribute to completion');
 		}
 	} finally { tree.dispose(); }
 }
@@ -55,7 +75,7 @@ suite('Certification Learning host integration', () => {
 
 	test('registers native learning commands', async () => {
 		const commands = await vscode.commands.getCommands(true);
-		for (const command of ['add', 'resume', 'open', 'openPage', 'portalWalkthrough', 'revertUnit', 'getState', 'export', 'import', 'reset']) {
+		for (const command of ['add', 'resume', 'open', 'openLab', 'openQuiz', 'openPage', 'portalWalkthrough', 'revertUnit', 'getState', 'export', 'import', 'reset']) {
 			assert.ok(commands.includes(`certLearner.${command}`), command);
 		}
 	});
@@ -79,6 +99,49 @@ suite('Certification Learning host integration', () => {
 	test('renders overview first, units next and reference leaves last with activity-only counts', () => {
 		assertPageTree(first);
 		assertPageTree(second);
+	});
+	test('renders exactly one Lab and one Quiz leaf per declared unit resource, never extra activities', () => {
+		const clone = structuredClone(first);
+		clone.root = 'tree-only-no-filesystem-access';
+		clone.manifest.units[0].resources.lab = 'native-lab.ipynb'; // Tree metadata only; no notebook file is created.
+		assertPageTree(clone);
+	});
+	test('opens the actual sample quiz before selecting an activity without progress changes or execution', async () => {
+		const before = JSON.stringify(await api.getState());
+		const tasks = vscode.tasks.taskExecutions.length;
+		const notebooks = vscode.workspace.notebookDocuments.length;
+		await api.openUnitResource({ courseId: first.id, unitId: first.manifest.units[0].unitId }, 'quiz');
+		assert.equal(JSON.stringify(await api.getState()), before);
+		assert.equal(vscode.tasks.taskExecutions.length, tasks);
+		assert.equal(vscode.workspace.notebookDocuments.length, notebooks);
+	});
+	test('rejects invalid resource selections before consulting caller paths, preserving progress and native documents', async () => {
+		const before = JSON.stringify(await api.getState());
+		const tasks = vscode.tasks.taskExecutions.length;
+		const notebooks = vscode.workspace.notebookDocuments.length;
+		const texts = vscode.workspace.textDocuments.length;
+		const untrusted = {
+			get root(): never { throw new Error('Caller root must not be read'); },
+			get path(): never { throw new Error('Caller path must not be read'); },
+			get course(): never { throw new Error('Caller course must not be read'); },
+			get unit(): never { throw new Error('Caller unit must not be read'); },
+			get resources(): never { throw new Error('Caller resources must not be read'); }
+		};
+		const withIds = (courseId: string, unitId: string) => Object.defineProperties({ courseId, unitId }, Object.getOwnPropertyDescriptors(untrusted));
+		for (const kind of ['lab', 'quiz'] as const) {
+			await assert.rejects(api.openUnitResource(withIds('unregistered', first.manifest.units[0].unitId), kind), /no longer registered/u);
+			await assert.rejects(api.openUnitResource(withIds(first.id, 'not-a-unit'), kind), /no longer registered/u);
+			await assert.rejects(api.openUnitResource({ courseId: first.manifest.courseId, unitId: first.manifest.units[0].unitId }, kind), /no longer registered/u);
+		}
+		const valid = withIds(first.id, first.manifest.units[0].unitId);
+		await api.openUnitResource(valid, 'quiz');
+		// The sample intentionally has no lab; rejection precedes native editor access.
+		// This verifies the safe handoff boundary, not a Jupyter kernel or execution.
+		await assert.rejects(api.openUnitResource(valid, 'lab'), /No lab is declared/u);
+		assert.equal(JSON.stringify(await api.getState()), before);
+		assert.equal(vscode.tasks.taskExecutions.length, tasks);
+		assert.equal(vscode.workspace.notebookDocuments.length, notebooks);
+		assert.equal(vscode.workspace.textDocuments.length, texts);
 	});
 	test('keeps overview, summary, cheatsheet and teardown untracked without registering a third course', () => {
 		const clone = structuredClone(first);
@@ -135,5 +198,14 @@ suite('Certification Learning host integration', () => {
 				assert.equal(vscode.tasks.taskExecutions.length, taskCount);
 			}
 		}
+	});
+	test('palette Open Quiz uses the current unit and preserves its selection, resume position and completion', async () => {
+		const before = await api.getState();
+		assert.equal(before.current?.unitId, first.manifest.units[0].unitId);
+		const tasks = vscode.tasks.taskExecutions.length;
+		await vscode.commands.executeCommand('certLearner.openQuiz');
+		await vscode.commands.executeCommand('certLearner.openQuiz', { courseId: first.id, unitId: first.manifest.units[0].unitId });
+		assert.deepEqual(await api.getState(), before);
+		assert.equal(vscode.tasks.taskExecutions.length, tasks);
 	});
 });

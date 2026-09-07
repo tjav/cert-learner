@@ -2,6 +2,25 @@
 
 Implementation changes for **Certification Learning** (`tjav.cert-learner`). Version headings do not imply that a GitHub Release has been published.
 
+## 0.2.0 — local preview implementation
+
+### Added
+
+- **Learning: Add Course** now offers **Local folder** or **GitHub repository**, with a direct **Learning: Add Course from GitHub** command. GitHub input is an HTTPS repository-root URL with optional `.git`, not SSH, tree/blob, branch, credential-bearing, or parameterized URLs. Clones fetch only the default branch, shallowly.
+- Trusted-workspace cloning with a parent-folder picker and exact-destination confirmation. A new repository-named child is created exclusively; existing destinations, even empty folders, are never overwritten. A valid root course manifest is required for registration. Failed/canceled clones retain any created destination, possibly partial, unregistered; a missing/invalid root manifest leaves the clone available for **Add Course → Local folder** on a valid subfolder.
+- **Lab** and **Quiz** leaves under units, after activities, using the same functionality as the existing **Open lab / Open quiz** activity-panel buttons. Resource opening does not change activity selection, resume position, completion, or activity counts; notebooks open without execution.
+- Interactive practice from version-1 structured JSON or the strict AI103 Markdown adapter. Single-choice radio clicks immediately show correct/incorrect feedback; multi-select uses checkboxes and **Check answer** at the exact required count. Grading uses exact set equality, authored correct options and explanations, one point per correct first submission, no partial credit, and no duplicate scoring.
+- Quiz Previous/Next, results Summary, and Restart/Retry. Attempts survive panel close/reopen within the extension session, but not extension/VS Code restarts. They are excluded from course progress and exports; persistent quiz scores are intentionally not implemented. Source revisions invalidate previous attempts.
+- Six-question [foundations structured sample](examples/foundations/quiz.json): five adaptations of the existing free-response questions plus a select-two safety question. Only the unit quiz declaration changes; the original [Markdown quiz](examples/foundations/quiz.md) stays unchanged as a root reference. Authoring docs link the existing quiz schema and specify the supported Markdown grammar.
+- GitHub-clone and quiz parser/grader/panel test suites. This entry records implementation scope, **not a passing v0.2.0 test run**, live private-clone/browser acceptance, installation, packaging, or release evidence. Earlier validation remains historical.
+
+### Safety and boundaries
+
+- Private clones use previously configured trusted Git credential helpers noninteractively; sign in separately and never paste tokens into course input. No hooks, submodules, course checks, cells, dependency installs, or provisioning are run. Checkout uses isolated Git configuration to suppress filters. Trusted authentication helpers may run: this is not a whole-process sandbox.
+- Unsupported/invalid quizzes show **Interactive quiz unavailable** and **Open source** when safely resolvable, without guessed answers. Feedback comes from authored source, not AI or current documentation; scores are practice results, not official exam results or certification evidence.
+- The initial client HTML omits the full raw answer key; submitted-question feedback is revealed separately. Self-study source remains available, so this is not secure exam delivery.
+- Existing unit/course progress reset behavior is unchanged. Quiz **Restart** clears only that in-memory attempt and does not reset learning progress or position. Adding/opening/navigating never automatically runs course code.
+
 ## 0.1.1 — local preview implementation
 
 ### Added
@@ -42,8 +61,8 @@ Implementation changes for **Certification Learning** (`tjav.cert-learner`). Ver
 
 ### Boundaries and pending work
 
-- Partial v0.1, targeting local desktop VS Code APIs **1.103+**. **Historical initial v0.1.0 validation:** 82 passing tests and three permission-dependent skips; two smoke tests passed in both standard VS Code 1.136.1 and Discovery's VS Code 1.124.0 host. These are not v0.1.1 results; workflows alone are not evidence of passing runs.
-- No scored quizzes, KaTeX/math rendering, pristine-exercise restore, cloud sync, telemetry backend, or automatic GitHub VSIX updates.
+- Partial v0.1, targeting local desktop VS Code APIs **1.103+**. **Historical initial v0.1.0 validation:** 82 passing tests and three permission-dependent skips; two smoke tests passed in both standard VS Code 1.136.1 and Discovery's VS Code 1.124.0 host. These are not v0.2.0 results; workflows alone are not evidence of passing runs.
+- At v0.1.0: no scored quizzes, KaTeX/math rendering, pristine-exercise restore, cloud sync, telemetry backend, or automatic GitHub VSIX updates. Interactive practice grading is added in v0.2.0 above.
 - Stale content versions stay flagged through navigation, completion, import, and reset. No content-version migration/acknowledgement workflow exists yet.
 - Course references are declared links, **not fetched or freshly verified**. The extension tutor has no tools; the AI103 course's separate `/explain` prompt may use documentation tools in the general agent workflow.
 - Path validation, sanitization, CSP, and workspace trust are not a sandbox. Course checks/notebooks may access credentials, use networks, delete resources, or incur charges. Review raw lesson comments before tutor sharing and exclude secrets/environment files/notebook outputs from distribution.

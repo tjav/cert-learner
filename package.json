@@ -2,7 +2,7 @@
   "name": "cert-learner",
   "displayName": "Certification Learning",
   "description": "Learn across certification courses with guided lessons, native notebooks, and private local progress.",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "publisher": "tjav",
   "license": "UNLICENSED",
   "repository": { "type": "git", "url": "https://github.com/tjav/cert-learner.git" },
@@ -19,9 +19,12 @@
   "contributes": {
     "viewsContainers": { "activitybar": [{ "id": "certLearner", "title": "Learning", "icon": "media/learning.svg" }] },
     "views": { "certLearner": [{ "id": "certLearner.courses", "name": "Certification Courses" }] },
-    "viewsWelcome": [{ "view": "certLearner.courses", "contents": "Add a local certification course to begin. No code runs automatically.\n[Add Course](command:certLearner.add)\n[Try Sample Course](command:certLearner.sample)" }],
+    "viewsWelcome": [{ "view": "certLearner.courses", "contents": "Add a local course or clone a GitHub repository to begin. No course code runs automatically.\n[Add Course](command:certLearner.add)\n[Add Course from GitHub](command:certLearner.addGitHub)\n[Try Sample Course](command:certLearner.sample)" }],
     "commands": [
       { "command": "certLearner.add", "title": "Learning: Add Course", "icon": "$(add)" },
+      { "command": "certLearner.addGitHub", "title": "Learning: Add Course from GitHub", "icon": "$(github)" },
+      { "command": "certLearner.openLab", "title": "Learning: Open Unit Lab" },
+      { "command": "certLearner.openQuiz", "title": "Learning: Open Unit Quiz" },
       { "command": "certLearner.refresh", "title": "Learning: Refresh Courses", "icon": "$(refresh)" },
       { "command": "certLearner.resume", "title": "Learning: Resume Course", "icon": "$(play)" },
       { "command": "certLearner.open", "title": "Learning: Open Activity" },
@@ -52,7 +55,7 @@
       "certLearner.runtimes.python": { "type": "string", "default": "python", "scope": "machine", "restricted": true, "description": "Python executable for approved checks; select the intended environment explicitly." },
       "certLearner.runtimes.pwsh": { "type": "string", "default": "pwsh", "scope": "machine", "restricted": true, "description": "PowerShell executable for explicitly approved checks." }
     } },
-    "jsonValidation": [{ "fileMatch": "course.json", "url": "./schemas/course.schema.json" }],
+    "jsonValidation": [{ "fileMatch": "course.json", "url": "./schemas/course.schema.json" }, { "fileMatch": "quiz.json", "url": "./schemas/quiz.schema.json" }],
     "chatParticipants": [{ "id": "certLearner.tutor", "name": "certlearning", "fullName": "Certification Learning", "description": "Explain the selected learning activity with course references", "commands": [{ "name": "explain", "description": "Explain the current concept" }, { "name": "hint", "description": "Give a small hint without revealing solutions" }] }]
   },
   "scripts": {
@@ -67,7 +70,7 @@
     "pretest": "npm run compile-tests && npm run compile && npm run lint",
     "check-types": "tsc --noEmit",
     "lint": "eslint src",
-    "test": "mocha out/src/test/core.test.js out/src/test/render.test.js out/src/test/runner.test.js out/src/test/pages.test.js out/src/test/activityTools.test.js out/src/test/uiActions.test.js",
+    "test": "mocha out/src/test/core.test.js out/src/test/render.test.js out/src/test/runner.test.js out/src/test/pages.test.js out/src/test/activityTools.test.js out/src/test/uiActions.test.js out/src/test/quiz.test.js out/src/test/quizPanel.test.js out/src/test/githubCourse.test.js",
     "test:integration": "npm run compile-tests && vscode-test",
     "vsix": "vsce package --no-dependencies --allow-missing-repository --skip-license",
     "validate-course": "node out/src/validateCourse.js"

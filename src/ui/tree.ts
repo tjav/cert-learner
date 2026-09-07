@@ -7,7 +7,7 @@ import type { Progress } from '../core/progress';
 import { activityLabel, activityStatus, boundProgress, completionSummary, unitLabel } from './status';
 
 export type Selection = { course: Course; unit: Unit; activity: Activity };
-export type TreeEntry = { course: Course; unit?: Unit; activity?: Activity; page?: CoursePage };
+export type TreeEntry = { course: Course; unit?: Unit; activity?: Activity; page?: CoursePage; resource?: 'lab' | 'quiz' };
 
 export class CourseTree implements vscode.TreeDataProvider<TreeEntry>, vscode.Disposable {
 	private courses: Course[] = [];
@@ -25,9 +25,12 @@ export class CourseTree implements vscode.TreeDataProvider<TreeEntry>, vscode.Di
 
 	getChildren(entry?: TreeEntry): TreeEntry[] {
 		if (!entry) { return this.courses.map(course => ({ course })); }
-		if (entry.activity || entry.page) { return []; }
+		if (entry.activity || entry.page || entry.resource) { return []; }
 		if (entry.unit) {
-			return entry.unit.activities.map(activity => ({ course: entry.course, unit: entry.unit, activity }));
+			return [
+				...entry.unit.activities.map(activity => ({ course: entry.course, unit: entry.unit, activity })),
+				...(['lab', 'quiz'] as const).filter(resource => entry.unit!.resources[resource]).map(resource => ({ course: entry.course, unit: entry.unit, resource }))
+			];
 		}
 		const course = entry.course;
 		const pages = getCoursePages(course);
@@ -40,13 +43,26 @@ export class CourseTree implements vscode.TreeDataProvider<TreeEntry>, vscode.Di
 
 	getParent(entry: TreeEntry): TreeEntry | undefined {
 		if (entry.page) { return { course: entry.course }; }
-		if (entry.activity && entry.unit) { return { course: entry.course, unit: entry.unit }; }
+		if ((entry.activity || entry.resource) && entry.unit) { return { course: entry.course, unit: entry.unit }; }
 		if (entry.unit) { return { course: entry.course }; }
 		return undefined;
 	}
 
 	getTreeItem(entry: TreeEntry): vscode.TreeItem {
 		const { course, unit, activity, page } = entry;
+		if (unit && entry.resource) {
+			const kind = entry.resource;
+			const label = kind === 'lab' ? 'Lab' : 'Quiz';
+			const item = new vscode.TreeItem(label, vscode.TreeItemCollapsibleState.None);
+			item.id = `certLearner.resource:${JSON.stringify([course.id, unit.unitId, kind])}`;
+			item.contextValue = `certLearner.${kind}`;
+			item.iconPath = new vscode.ThemeIcon(kind === 'lab' ? 'notebook' : 'question');
+			item.description = kind === 'lab' ? 'Native notebook' : 'Interactive practice';
+			item.tooltip = kind === 'lab' ? 'Open this unit’s notebook without running any cells.' : 'Practice with immediate feedback and authored explanations. Quiz scores do not complete course activities.';
+			item.command = { command: kind === 'lab' ? 'certLearner.openLab' : 'certLearner.openQuiz', title: `Open ${label.toLowerCase()}`, arguments: [{ courseId: course.id, unitId: unit.unitId }] };
+			item.accessibilityInformation = { label: `${label}, ${item.description}` };
+			return item;
+		}
 		if (page) {
 			const item = new vscode.TreeItem(page.title, vscode.TreeItemCollapsibleState.None);
 			item.id = `certLearner.page:${JSON.stringify([course.id, page.id])}`;

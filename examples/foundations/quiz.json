@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 1,
+  "title": "Foundations — local practice",
+  "questions": [
+    {
+      "id": "pencil_total",
+      "prompt": "Two boxes contain two pencils each. How many pencils are there altogether?",
+      "options": [
+        { "id": "A", "text": "Two pencils." },
+        { "id": "B", "text": "Three pencils." },
+        { "id": "C", "text": "Four pencils." }
+      ],
+      "correctOptionIds": ["C"],
+      "explanation": "Two groups of two pencils make four pencils. Count the first box, then continue counting through the second box. Two counts only one box; three misses a pencil."
+    },
+    {
+      "id": "pencil_subtraction",
+      "prompt": "Remove one pencil from the total of four pencils. How many remain?",
+      "options": [
+        { "id": "A", "text": "Three pencils." },
+        { "id": "B", "text": "Four pencils." },
+        { "id": "C", "text": "Five pencils." }
+      ],
+      "correctOptionIds": ["A"],
+      "explanation": "Removing one from four leaves three. Four ignores the removal; five would mean adding a pencil instead."
+    },
+    {
+      "id": "manual_completion",
+      "prompt": "Does choosing **Mark complete** prove that you understood the lesson?",
+      "options": [
+        { "id": "A", "text": "Yes. It verifies your reasoning." },
+        { "id": "B", "text": "No. It records your own report of learning." },
+        { "id": "C", "text": "Yes. It runs the arithmetic check automatically." }
+      ],
+      "correctOptionIds": ["B"],
+      "explanation": "Manual completion is a self-reported learning record. It neither assesses your explanation nor runs a check."
+    },
+    {
+      "id": "limited_check_evidence",
+      "prompt": "If the fixed arithmetic check passes, does that prove your quiz answers are correct?",
+      "options": [
+        { "id": "A", "text": "Yes. The script reads and grades your answers." },
+        { "id": "B", "text": "Yes. A passing calculation proves you understood the lesson." },
+        { "id": "C", "text": "No. The script checks its own arithmetic, not your answers." }
+      ],
+      "correctOptionIds": ["C"],
+      "explanation": "A pass is limited evidence that the local arithmetic check ran and returned a passing result in the expected format. The script cannot tell whether you can explain the calculation and does not read your quiz answers."
+    },
+    {
+      "id": "no_automatic_execution",
+      "prompt": "Should adding this course or moving to the next activity execute its check?",
+      "options": [
+        { "id": "A", "text": "No. Running a check requires your explicit decision and approval in a trusted workspace." },
+        { "id": "B", "text": "Yes. Adding a course should run all its checks." },
+        { "id": "C", "text": "Yes. Next should run the check and complete the activity." }
+      ],
+      "correctOptionIds": ["A"],
+      "explanation": "Zero auto-run means adding a course and navigating do not execute checks. Previous and Next navigate without completing activities; a check runs only after trust and explicit approval."
+    },
+    {
+      "id": "safe_local_practice",
+      "prompt": "Select two actions that follow this lesson's safe learning workflow before running the optional local check.",
+      "options": [
+        { "id": "A", "text": "Inspect the check script before deciding whether to run it." },
+        { "id": "B", "text": "Treat workspace trust as a sandbox that prevents all side effects." },
+        { "id": "C", "text": "Choose Run check deliberately and review the confirmation; you may decline." },
+        { "id": "D", "text": "Rely on adding the course or choosing Next to execute the check." }
+      ],
+      "correctOptionIds": ["A", "C"],
+      "explanation": "Inspecting the script and explicitly approving a reviewed check are both required safety steps. Workspace trust is not a sandbox, and course loading or navigation must not execute the script. You can decline and leave the check-based activity incomplete."
+    }
+  ]
+}
