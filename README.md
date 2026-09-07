@@ -6,7 +6,7 @@
 | --- | --- |
 | Extension ID | `tjav.cert-learner` |
 | Implementation version | **0.2.0** |
-| GitHub repository | [tjav/cert-learner](https://github.com/tjav/cert-learner), **PRIVATE** |
+| GitHub repository | [tjav/cert-learner](https://github.com/tjav/cert-learner), **PUBLIC** |
 | License | **UNLICENSED**, intentionally pending a license decision; not an open-source license grant |
 | Host API requirement | VS Code **1.103.0 or later**, within the declared `^1.103.0` range |
 
@@ -39,14 +39,14 @@
 
 ### Install from a GitHub Release
 
-Install the preview from the private repository's releases:
+Install the preview from the public repository's releases:
 
-1. Sign in to GitHub with an account that has access to [tjav/cert-learner Releases](https://github.com/tjav/cert-learner/releases). **Recipients need private-repository access**; a release link does not make the package public.
+1. Open [tjav/cert-learner Releases](https://github.com/tjav/cert-learner/releases). No private-repository access or GitHub sign-in is required to download the release.
 2. Download the release's Cert Learner **VSIX** and **SHA256SUMS** checksum asset. Compare the VSIX's SHA-256 with the listed value before installing; a checksum detects changed bytes, not whether the code is trustworthy.
 3. In the **actual desktop host you intend to use**, open **Extensions → … → Install from VSIX…**, select the downloaded package, and reload/restart extensions if prompted. The equivalent Command Palette action is **Extensions: Install from VSIX…**. Installing into a separate VS Code installation does not establish installation or compatibility in Discovery.
 4. Confirm **Certification Learning**, ID `tjav.cert-learner`, appears in that host's installed extensions. Open **Learning**, or run **Learning: Try Sample Course**.
 
-If no release is available to your account, request repository access or use the developer steps below. This project does not claim a Marketplace listing. **GitHub VSIX updates are manual:** download the next release and repeat installation in the same host. Export progress before changing host, workspace, or course location. No updater polls GitHub.
+You can also build locally using the developer steps below. This project does not claim a Marketplace listing. **GitHub VSIX updates are manual:** download the next release and repeat installation in the same host. Export progress before changing host, workspace, or course location. No updater polls GitHub.
 
 ## Add a course and learn
 
@@ -78,7 +78,7 @@ For private repositories, sign in separately using Git/Git Credential Manager an
 
 - **Learning: Try Sample Course** registers [examples/foundations/course.json](examples/foundations/course.json): two activities and a six-question [structured quiz](examples/foundations/quiz.json). The first five adapt the original pencil arithmetic, manual-completion, limited-check-evidence, and no-auto-run questions; the sixth demonstrates **select exactly two** safety choices. The unchanged [examples/foundations/quiz.md](examples/foundations/quiz.md) remains a readable top-level reference, not the interactive unit quiz. Inspect [examples/foundations/check.cjs](examples/foundations/check.cjs) before running it. It checks $2 + 2$, not learner answers or competence, and writes only its runner-supplied result file; it needs no network or credentials.
 - To demonstrate independent course progress, use **Learning: Add Course → Local folder** on the folder containing [examples/second-course/course.json](examples/second-course/course.json). Neither bundled sample declares a notebook; lab controls are therefore unavailable in these samples.
-- The separate private [AI103 learning repository](https://github.com/tjav/ai103-learning) has **17 units** with existing IDs/objectives and additive `format`, `schemaVersion`, and `contentVersion` metadata. Its current manifest defaults activities to manual completion and declares no automated cloud checks. It is a course pack, not bundled extension content; consult its own prerequisites and cleanup guidance.
+- The separate public [AI103 learning repository](https://github.com/tjav/ai103-learning) has **17 units** with existing IDs/objectives and additive `format`, `schemaVersion`, and `contentVersion` metadata. Its current manifest defaults activities to manual completion and declares no automated cloud checks. It is a course pack, not bundled extension content; consult its own prerequisites and cleanup guidance.
 - **Windows ARM64 course limitation:** the AI103 evaluation SDK dependency set cannot be installed/run as-is on native Windows ARM64 because of its pinned dependencies. Consult the [course's evaluation dependency notes](https://github.com/tjav/ai103-learning/blob/main/requirements-eval.txt) for a supported environment. This is separate from the extension's runtime and does not establish ARM64 host validation.
 
 ### Overview, reference pages, and lesson rendering
@@ -282,7 +282,7 @@ After test compilation, `npm run validate-course -- examples/foundations/course.
 | [src/test/core.test.ts](src/test/core.test.ts), [src/test/render.test.ts](src/test/render.test.ts), [src/test/runner.test.ts](src/test/runner.test.ts), [src/test/pages.test.ts](src/test/pages.test.ts), [src/test/activityTools.test.ts](src/test/activityTools.test.ts), [src/test/uiActions.test.ts](src/test/uiActions.test.ts), [src/test/extension.test.ts](src/test/extension.test.ts) | Portable suites, mocked UI actions, and limited real-host smoke tests. |
 | [package.json](package.json), [esbuild.js](esbuild.js), [.vscode-test.mjs](.vscode-test.mjs), [.vscodeignore](.vscodeignore) | Extension contributions/scripts, bundling, test-host configuration, packaging exclusions. |
 
-### CI and private releases
+### CI and releases
 
 [.github/workflows/ci.yml](.github/workflows/ci.yml) configures Node 24 on **Ubuntu, Windows, and macOS** for pushes and pull requests: `npm ci`, `npm test`, Linux Xvfb/native host integration tests, then VSIX packaging. It uses `contents: read` and publishes no artifacts or releases.
 
@@ -296,6 +296,18 @@ There is no persistent quiz-score storage/export, secure-exam mode, KaTeX render
 
 ## License
 
-[package.json](package.json) deliberately declares **UNLICENSED** while the owner decides licensing. Private repository access and the ability to download a VSIX do not grant a public/open-source redistribution license. Course packs and third-party dependencies have separate terms. No public visibility change or license choice is made by this implementation.
+[package.json](package.json) deliberately declares **UNLICENSED** while the owner decides licensing. Public repository visibility and the ability to download a VSIX do not grant an open-source redistribution license. Course packs and third-party dependencies have separate terms. No license change is made by this publication.
 
 The build includes license notices for bundled dependencies in the VSIX. Missing dependency license files fail the packaging build rather than silently dropping attribution.
+
+## Contributions and main-branch access
+
+You can propose changes through issues or pull requests from your fork.
+**Only [tjav](https://github.com/tjav) may merge pull requests into `main` or
+update `main` directly.** GitHub repository rules enforce this; the code-owner
+entry in [.github/CODEOWNERS](.github/CODEOWNERS) identifies the reviewer but
+does not grant write or merge access. Automation is not granted a `main` bypass.
+
+Do not include credentials, local environment files, learner state, or notebook
+outputs in contributions. Fork pull-request workflows require maintainer approval
+and have read-only default token permissions; review changes before approving runs.
